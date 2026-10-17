@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.cache/
+env/
+src-tauri/target/
+*.local
+artifacts/
+test-results/
+playwright-report/
+tsconfig.tsbuildinfo
+.tools/
