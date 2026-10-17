@@ -4,22 +4,27 @@
 
 当前探针只包含组件页，编辑窗口/托盘/热键/自启/Rust 文件后端尚未接入，这是预期状态。
 
+2026-10-17 已在这台机器上执行完毕，结果、截图与判定见 [P0-REPORT.md](P0-REPORT.md)。
+
 ## 准备
 
-Win11 构建机：
+以下操作在 Win11 上执行；构建环境使用项目内隔离环境，不依赖全局 Rust/MSVC，详见 [DEV-ENV.md](DEV-ENV.md)。Linux 工作区不能直接套用。
 
-- Node 20+
-- Rust stable MSVC
-- Visual Studio 2022 Build Tools，Desktop development with C++
-- WebView2（Win11 自带）
-
-```powershell
-cd Sotto
+```bash
+. env/activate.sh
 pnpm install
+export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222"
 pnpm tauri dev
 ```
 
 首次启动会弹自启询问，P0 选“暂不启用”，避免影响测试。
+
+自动化探针（2026-10-17 实际执行时使用）：
+
+- `tools/p0/inspect.ps1`：窗口样式、z 序、矩形、前台窗口。
+- `tools/p0/cdp.mjs`：通过 CDP 读写页面状态（`127.0.0.1:9222`）。
+- `tools/p0/input.ps1`：点击、双击、拖动、滚轮、Win+D、Alt+Tab、截图。
+- `tools/p0/appwindow.ps1`：普通前台窗口，用于覆盖与焦点测试。
 
 ## 主题切换
 

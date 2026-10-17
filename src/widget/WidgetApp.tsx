@@ -33,8 +33,8 @@ export function WidgetApp() {
   }, [])
 
   useEffect(() => {
-    void setupDesktopLayer()
-  }, [])
+    void setupDesktopLayer(snapshot.settings.theme)
+  }, [snapshot.settings.theme])
 
   useEffect(() => {
     setAtBottom(false)

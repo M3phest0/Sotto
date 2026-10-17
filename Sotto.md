@@ -2,13 +2,17 @@
 
 > 产品名称：Sotto
 > 目标平台：Windows 11 x64（22H2 及以上）
-> 方案版本：v0.6
-> 更新日期：2026-10-17
-> 当前状态：P0 契约已锁定；P1 锁定项已定；P1 参数按本文件默认；尚未开始编码
+> 方案版本：v0.7
+> 更新日期：2026-10-18
+> 当前状态：P0 已通过；M1 前端完成；M2 开始
+
+> P0 执行报告：[docs/P0-REPORT.md](docs/P0-REPORT.md)。焦点模式选 1；桌面层改为 Win32 `set_desktop_layer`；不再使用 `setAlwaysOnBottom`。
 
 ---
 
 ## 0. 版本摘要
+
+v0.7 把 P0 实测结果写回设计：焦点模式选定 1（`focusable(false)`）；`setAlwaysOnBottom` 因动态壁纸 WorkerW 被废弃，改为 `set_desktop_layer`；亚克力由 `set_acrylic` 命令按主题开关；Win+D 实测组件保持可见；滚轮默认可用，关闭系统“非活动窗口滚动”的交叉验证留作已知风险。
 
 v0.6 只做产品更名：Todo List → Sotto。目录、窗口标题、文档标题、bundle id、默认文件名同步为 Sotto；设计内容与 v0.5 一致。
 
@@ -417,30 +421,26 @@ Check-then-replace 覆盖窗口：
 
 ## 6. 窗口、系统与主题
 
-### 6.1 焦点模式：P0 定死，不静默 fallback
+### 6.1 焦点模式：P0 选定模式 1
 
-P0 必须三选一，并写死：
+2026-10-17 P0 结论：模式 1，`focusable(false)` 原生可用。点击不抢焦点，非前台滚轮可滚动，顶部条拖动正常。
 
-1. `focusable(false)` 原生可用：点击/滚轮/拖动都正常。
-2. `focusable(false)` + raw input 滚轮兜底：滚轮可用。
-3. 可聚焦降级模式：明确切换，托盘显示“桌面层降级：可聚焦”，文档写明点击会临时抢焦点/盖住普通窗口。
+实现：
 
-规则：
-
-- 不做静默 fallback。
-- 降级模式必须托盘可见、文档可见。
+- 前端 `setupDesktopLayer(theme)` 调用 `setFocusable(false)`、`set_desktop_layer` 和 `set_acrylic`。
+- 不在运行期自动切换模式；不启用 raw input 滚轮。
+- 模式 3（可聚焦降级）只保留为文档化兜底。未来若在别的机器滚轮失效，明确切换并在托盘提示，不得静默降级。
 - 不做点击聚焦作为默认行为。
-- P0 结论写入构建配置/常量；实现不得在运行时自动切换模式，除非用户明确触发。
+- P0 证据见 `docs/P0-REPORT.md`。
 
 ### 6.2 滚轮矩阵
 
-P0 必须测六种组合：系统“非活动窗口滚动”开/关 × 点击/滚轮/拖动。
+P0 已测：默认系统设置下，组件非前台时滚轮可用，`scrollTop` 0→72，焦点未变。
 
-- 默认接受限制；不做全局鼠标钩子，不做点击聚焦。
+- 第 7 项“关闭系统非活动窗口滚动”需要重启 Explorer 才生效，本轮未完成交叉验证；已恢复系统原值，不阻塞默认路径。
+- 实现依赖 WebView2 在 `WS_EX_NOACTIVATE` 下的默认滚动行为；不加全局鼠标钩子，不做 raw input。
+- 若后续在关闭该设置的机器上确认失效，再按模式 3 或一次性提示处理；不得静默改变焦点模式。
 - 系统设置关闭时，设置页给一次性提示，文档写明限制。
-- 如果系统设置开启时 WebView2 仍收不到滚轮，升级 P0 缺陷，用 raw input（RIDEV_INPUTSINK）把滚轮事件转发给渲染层滚动容器，不点击聚焦。
-- 兼容开关只在需要时提供，放托盘，不进设置页；默认关闭。
-- raw input 兜底设时间盒；超时记录风险，回到“接受限制”。
 
 ### 6.3 拖动与锁定
 
@@ -462,8 +462,8 @@ P0 必须测六种组合：系统“非活动窗口滚动”开/关 × 点击/�
 
 ### 6.5 Win+D 与生命周期
 
-- Win+D 默认不自动恢复，避免组件挡住用户想看的桌面图标。
-- 托盘提供“显示桌面时保持组件”开关；开启时才自动恢复。
+- P0 实测：Win+D 后组件保留在桌面层可见，不进入最小化，也不挡桌面图标（它在图标层之上、普通窗口之下）。
+- 因此不需要“显示桌面时保持组件”开关，也不需要自动恢复逻辑。
 - 会话解锁/唤醒：重读文件、重挂 watcher、重应用效果、重算位置/最大高度。
 - RDP 重连：同上；亚克力按手动设置决定是否重试。
 - Explorer 重启：组件独立；重注册托盘，必要时处理 TaskbarCreated。
@@ -484,7 +484,7 @@ P0 必须测六种组合：系统“非活动窗口滚动”开/关 × 点击/�
 - 自启注册失败：显示错误，不标记已启用；asked 保留，不再自动追问。
 - 读 `StartupApproved\Run`，显示“已被系统禁用”；不强行改回。
 - 注册表被外部删除但设置仍启用：下次启动重新注册。
-- 托盘菜单：打开编辑、显示/隐藏组件、锁定位置、显示桌面时保持、主题切换、开机自启、退出。
+- 托盘菜单：打开编辑、显示/隐藏组件、锁定位置、主题切换、开机自启、退出。
 - 托盘左键：切换组件显示；右键：菜单。
 - 单实例：重复启动唤出编辑窗口。
 - 退出只能从托盘或编辑窗口；组件无关闭按钮。
@@ -494,10 +494,11 @@ P0 必须测六种组合：系统“非活动窗口滚动”开/关 × 点击/�
 | 主题 | 表现 | 说明 |
 |---|---|---|
 | 深色（默认） | 近黑卡片、浅色文字、细边框、圆角 | 稳定 |
-| 亚克力 | 透明窗口 + DWM 亚克力 + 深色半透明覆盖层 | 失败回退深色 |
+| 亚克力 | 透明窗口 + DWM 亚克力 + 深色半透明覆盖层 | `set_acrylic` 命令按主题开关；失败回退深色 |
 
 - 固定配色；无自定义字体族/颜色/边框/圆角/透明度。
 - 启动读取 `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize` 的 `EnableTransparency`；为 0 直接用深色。
+- P0 实测：系统透明关闭 + 亚克力 ON 时不模糊但仍为灰色背景，无黑底；设置已恢复。
 - RDP/运行中失败不可靠自动探测；手动切换；不承诺自动检测变化。
 - 设置页显示 effective theme：如“当前主题：深色（亚克力不可用）”。
 - 首次回退：编辑窗口开着用状态栏；没开用托盘通知。组件不弹窗。
@@ -539,6 +540,8 @@ Sotto/
 
 - `get_snapshot`：文件 + 任务 + 设置 + 字节元数据。
 - `save_markdown`：`{baseDiskHash, revision, content}`；状态机、冲突、原子写、备份。
+- `set_desktop_layer`：Win32 桌面层定位（P0 已实现）。
+- `set_acrylic`：按主题开关 DWM 亚克力（P0 已实现）。
 - `open_editor`、`pick_markdown_file`、`set_expanded`、`set_locked`、`save_settings`、`set_theme`、`reset_position`、`open_data_dir`。
 - 已移除 `set_task_checked`；预览不直接写磁盘。
 - 事件：`file-changed`、`settings-changed`、`editor-opened`、`backup-failed`、`save-state`。
@@ -566,8 +569,10 @@ Sotto/
 
 - 锁定 tauri crate、`@tauri-apps/api`、`Cargo.lock`、`pnpm-lock.yaml`；CI frozen。
 - rust-toolchain.toml 固定验证过的 stable；Node engines `>=20`。
-- `setFocusable` 与 Tauri 版本绑定；P0 探针验证。
+- `setFocusable` 与 Tauri 版本绑定；P0 已在本机验证模式 1 可用。
+- `src-tauri/Cargo.toml` 使用 `crate-type = ["rlib"]`；这是 windows-gnu + rust-lld 下桌面构建的限制，已由 P0 构建验证。
 - 构建/原生验收在 Win11；Linux DSH 用于前端、Rust 核心单测、Playwright 截图和文档。
+- Windows P0 使用隔离的 GNU 工具链；详见 `docs/DEV-ENV.md`。
 
 ---
 
@@ -582,8 +587,10 @@ Sotto/
 | 外部写入覆盖窗口 | 校验后替换前外部写入被覆盖 | 明确 check-then-replace 覆盖窗口；记日志；不承诺外部写入不被覆盖 |
 | 备份 41/40 | 保留规则和上限冲突 | 每源 41；10+24+7；200MB/1GB；每源至少 1；manifest 原子 |
 | 解析 JS/Rust 分叉 | 嵌套/续行/代码块/表格错位 | 同一规范 + `shared/corpus` + fuzz；续行/非任务父项/缩进代码定义 |
-| 焦点模式 | 静默 fallback 破坏桌面体验 | P0 三选一写死；降级模式托盘可见；不运行时自动切换 |
-| Win+D | 自动恢复挡住桌面图标 | 默认不恢复；托盘开关；开启才恢复 |
+| 焦点模式 | 静默 fallback 破坏桌面体验 | P0 选定模式 1；降级模式只文档化；不运行时自动切换 |
+| 动态壁纸 / WorkerW | `setAlwaysOnBottom` 被壁纸盖住 | 自定义 `set_desktop_layer`，插到含 `SHELLDLL_DefView` 的 WorkerW 之上；找不到回退 Progman |
+| Win+D | 自动恢复挡住桌面图标 | P0 实测保持可见；无恢复开关 |
+| 非活动窗口滚动关闭 | 第 7 项未完成交叉验证 | 默认路径已通过；重测需重启 Explorer；不预置 raw input |
 | 首启 | OneDrive 重定向/登录弹窗 | known folder；仅手动首启；登录不弹；2s 仅登录 |
 | 预览性能 | 1MB/5000 行卡顿 | >2000 行/512KB 静态任务视图；“加载完整预览”按钮；不卡后降级 |
 | 无焦点能力 | 不能复制/键盘 | 明确边界；编辑窗口输入；托盘提示 |
@@ -601,7 +608,7 @@ Sotto/
 | Rust 单测 | BOM/EOL/末尾换行、编码、ReplaceFileW/ACL/属性、UNC/长路径、状态机、备份 41/manifest、watcher |
 | 前端 Vitest/Playwright | Vite + mock IPC；两个内容交互、5/15、底部四态、revision、IME、快捷键、设置 8、预览模式 |
 | Windows CI | Rust/文件/窗口测试跑 windows-latest；corpus Linux + Windows |
-| Windows 实机 | P0 焦点/滚轮矩阵、置底、Alt+Tab、DPR/多屏、RDP、Explorer、Win+D、首启 |
+| Windows 实机 | P0 焦点/滚轮矩阵、置底、Alt+Tab、DPR/多屏、RDP、Explorer、Win+D、首启；P0 已完成，见 `docs/P0-REPORT.md` |
 | 安全 | CSP、图片不请求、导航/window.open 拦截、协议白名单 |
 | 构建 | 锁文件、exe、图标、版本、WebView2 最低版本 |
 
@@ -617,8 +624,8 @@ Windows 11 22H2 只作最低 API 声明；实机验收覆盖 24H2/25H2。M1 用 
 4. 底部四态正确；滚到边界不展开；高度稳定；双击/300ms 二次点击只算一次。
 5. 嵌套显示/计数/勾选/隐藏正确；每级 16px、最多 3 级；非任务父项给深度。
 6. 拖动条紧凑/展开可用；锁定后消失、锁图标出现、全禁移动。
-7. 焦点模式与 P0 结论一致；降级模式托盘可见；无静默切换。
-8. 系统非活动滚动开/关 × 点击/滚轮/拖动矩阵有记录；滚轮失败时提示。
+7. 焦点模式为 P0 选定的模式 1；降级模式只文档化；无静默切换。
+8. 系统非活动滚动开/关矩阵有记录；默认开已通过，关闭项待 Explorer 重启后补测。
 9. `Ctrl+Alt+E`/`Ctrl+Alt+L`；UIPI 实测结果记录。
 10. 中文 IME 不跳光标；composition 后保存正常。
 11. 首启仅手动弹；known folder；未同意无注册表；登录自启不弹；2s 只用于登录。
@@ -630,7 +637,7 @@ Windows 11 22H2 只作最低 API 声明；实机验收覆盖 24H2/25H2。M1 用 
 17. 外部修改/check-then-replace 覆盖窗口有测试记录；watcher 不重复重挂。
 18. 深色/亚克力/effective theme/回退通知；RDP 手动。
 19. 150%/200% DPI、多屏、任务栏自动隐藏、拔插后夹回；插回不跳屏。
-20. Win+D 默认不恢复；托盘开关打开后恢复。
+20. Win+D 后组件保持桌面层可见；无恢复开关。
 21. 解锁/唤醒/RDP/Explorer/混合 DPI 恢复；WM_QUERYENDSESSION 落盘。
 22. 5000 行/1MB 基准或任务专用视图；编辑窗口 bounds 恢复。
 23. exe ≤15MB；内存 ≤120MB；CPU <1%；启动 ≤3s。
@@ -645,7 +652,7 @@ Windows 11 22H2 只作最低 API 声明；实机验收覆盖 24H2/25H2。M1 用 
 - 首启未同意无注册表；登录自启无弹窗。
 - 备份 41 份/manifest/全局 1GB/每源 1 份。
 - 保存单飞无假冲突；外部冲突不静默覆盖。
-- 焦点模式 P0 定死；Win+D 默认不恢复。
+- 焦点模式 P0 选 1；Win+D 后保持可见。
 - 预览超过 2000 行/512KB 默认任务专用视图；完整预览按钮可用。
 
 ---
@@ -757,13 +764,13 @@ pnpm tauri build
 
 ## 14. 仍未定
 
-- 焦点模式最终选哪一条：P0 三选一；当前不预设，不允许运行时静默 fallback。
-- WebView2 最低版本：P0 实测后固定并写入文档。
+- 第 7 项滚轮矩阵的“关闭系统非活动窗口滚动”分支：需要重启 Explorer 后补测；默认路径不阻塞。
+- WebView2 最低版本：P0 实测 155.0.4283.60，最低版本待固定。
 - License：MIT / Apache-2.0 / 私有，尚未定。
 - 可选 tauri-driver 原生冒烟是否纳入 CI。
-- 崩溃草稿恢复是否做；当前不列入 v0.5 必做。
+- 崩溃草稿恢复是否做；当前不列入必做。
 - 高对比度/系统文字缩放支持：当前不保证，若要做另开需求。
-- 构建环境是否就绪：排期前置检查，不算设计修改。
+- MSVC 与 windows-gnu 双构建是否都保留；P0 使用 GNU，GitHub CI 使用 MSVC，待验证。
 
 ---
 
@@ -771,6 +778,7 @@ pnpm tauri build
 
 | 版本 | 日期 | 变化 |
 |---|---|---|
+| v0.7 | 2026-10-18 | 写入 P0 结果：焦点模式 1；`setAlwaysOnBottom` 改为 `set_desktop_layer`（WorkerW/Progman 锚点）；`set_acrylic` 按主题开关；Win+D 保持可见；滚轮默认可用，第 7 项待补测 |
 | v0.6 | 2026-10-17 | 产品更名为 Sotto：标题、README、bundle id `com.sotto.widget`、默认文件 `Sotto.md`、localStorage/通道前缀同步；设计内容不变 |
 | v0.5 | 2026-10-17 | 补 P0 数据完整性：EOL/BOM/末尾换行、编码检测、ReplaceFileW、状态机、备份 41/manifest/LocalAppData、settings schema、解析边界/fuzz、预览静态阈值、焦点模式 P0、Win+D 默认、首启 known folder、编辑页快捷键/关闭提示、数据位置、Windows 语义、CI/交付文档；工时 34–46 小时；仍未定章节 |
 | v0.4 | 2026-10-17 | P0 契约/P1 锁定/P1 参数分层；草稿 revision 与单飞保存；watcher 重读哈希；备份 manifest/裁剪；坐标 monitorDevicePath；JS/Rust golden；非受控 textarea；安全导航；28–38 小时 |

@@ -3,11 +3,13 @@ name = "sotto"
 version = "0.1.0"
 description = "Sotto desktop widget for Windows 11"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.82"
 
 [lib]
 name = "sotto_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# 仅桌面 Windows：cdylib 在 windows-gnu + rust-lld 下会因导出符号超过 65535 而失败；
+# 桌面构建只需要 rlib（bin 链接它）。移动端才需要 staticlib/cdylib。
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
