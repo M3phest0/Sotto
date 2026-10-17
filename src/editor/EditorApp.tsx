@@ -13,11 +13,16 @@ import { renderFullMarkdown } from '../shared/markdown'
 import { getProgress, parseTaskDocument } from '../shared/taskParser'
 import type { Settings, TaskDocument } from '../shared/types'
 import {
-  loadSnapshot,
+  loadSnapshot as loadMockSnapshot,
   saveDocumentText,
-  saveSettings,
 } from '../shared/mock'
-import { normalizeSettings } from '../shared/settings'
+import {
+  loadSnapshot as loadBackendSnapshot,
+  saveMarkdown,
+  saveSettings,
+} from '../shared/api'
+import { isTauri } from '../shared/desktop'
+import { DEFAULT_SETTINGS, normalizeSettings } from '../shared/settings'
 import './editor.css'
 
 type Tab = 'edit' | 'settings'
@@ -44,15 +49,17 @@ function statusLabel(state: SaveState): string {
 }
 
 export function EditorApp() {
-  const initial = useMemo(() => loadSnapshot(), [])
-  const [text, setText] = useState(initial.text)
-  const [path, setPath] = useState(initial.path)
-  const [settings, setSettings] = useState<Settings>(initial.settings)
+  const useBackend = isTauri()
+  const initial = useMemo(() => (useBackend ? null : loadMockSnapshot()), [useBackend])
+  const [text, setText] = useState(initial?.text ?? '')
+  const [path, setPath] = useState(initial?.path ?? 'Documents/Sotto.md')
+  const [settings, setSettings] = useState<Settings>(initial?.settings ?? DEFAULT_SETTINGS)
+  const [booting, setBooting] = useState(useBackend)
   const [tab, setTab] = useState<Tab>('edit')
   const [previewMode, setPreviewMode] = useState<PreviewMode>('tasks')
   const [revision, setRevision] = useState(0)
   const [renderedRevision, setRenderedRevision] = useState(0)
-  const [preview, setPreview] = useState<TaskDocument>(() => parseTaskDocument(initial.text))
+  const [preview, setPreview] = useState<TaskDocument>(() => parseTaskDocument(initial?.text ?? ''))
   const [dirty, setDirty] = useState(false)
   const [saveState, setSaveState] = useState<SaveState>('idle')
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null)
@@ -60,6 +67,10 @@ export function EditorApp() {
   const [showCloseConfirm, setShowCloseConfirm] = useState(false)
   const [editorNonce, setEditorNonce] = useState(0)
   const revisionRef = useRef(0)
+  const baseHashRef = useRef(initial?.meta?.hash ?? '')
+  const savingRef = useRef(false)
+  const pendingRef = useRef(false)
+  const blockedRef = useRef(false)
   const composingRef = useRef(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -88,6 +99,33 @@ export function EditorApp() {
   }
 
   useEffect(() => {
+    if (!useBackend) return
+    let active = true
+    void loadBackendSnapshot()
+      .then((next) => {
+        if (!active) return
+        setText(next.text)
+        setPath(next.path)
+        setSettings(next.settings)
+        setPreview(parseTaskDocument(next.text))
+        setRenderedRevision(revisionRef.current)
+        baseHashRef.current = next.meta?.hash ?? ''
+        setBooting(false)
+        if (next.readOnlyReason) setNotice(next.readOnlyReason)
+        if (textareaRef.current) textareaRef.current.value = next.text
+      })
+      .catch((err) => {
+        if (!active) return
+        setBooting(false)
+        setSaveState('error')
+        setNotice(String(err))
+      })
+    return () => {
+      active = false
+    }
+  }, [useBackend])
+
+  useEffect(() => {
     if (composingRef.current) return
     const timer = window.setTimeout(() => {
       commitPreview(text, revision)
@@ -96,16 +134,9 @@ export function EditorApp() {
   }, [text, revision])
 
   useEffect(() => {
-    if (!dirty || composingRef.current) return
+    if (!dirty || composingRef.current || blockedRef.current) return
     const timer = window.setTimeout(() => {
-      try {
-        saveDocumentText(text)
-        setDirty(false)
-        setSaveState('saved')
-        setLastSavedAt(Date.now())
-      } catch {
-        setSaveState('error')
-      }
+      void persistNow()
     }, 1000)
     return () => window.clearTimeout(timer)
   }, [dirty, text])
@@ -116,15 +147,56 @@ export function EditorApp() {
     return () => window.clearTimeout(timer)
   }, [notice])
 
-  function saveNow(): void {
-    try {
-      saveDocumentText(text)
-      setDirty(false)
-      setSaveState('saved')
-      setLastSavedAt(Date.now())
-    } catch {
-      setSaveState('error')
+  async function persistNow(): Promise<void> {
+    if (blockedRef.current) return
+    if (savingRef.current) {
+      pendingRef.current = true
+      return
     }
+    const content = textareaRef.current?.value ?? text
+    const revisionAtSave = revisionRef.current
+    savingRef.current = true
+    setSaveState('saving')
+    try {
+      if (!useBackend) {
+        saveDocumentText(content)
+      } else {
+        const result = await saveMarkdown(baseHashRef.current, revisionAtSave, content)
+        if (result.status === 'conflict') {
+          blockedRef.current = true
+          setSaveState('error')
+          setNotice(result.message ?? '磁盘文件已变化；未覆盖')
+          return
+        }
+        if (result.status === 'error') {
+          setSaveState('error')
+          setNotice(result.message ?? '保存失败')
+          return
+        }
+        baseHashRef.current = result.diskHash ?? ''
+      }
+      setLastSavedAt(Date.now())
+      if (revisionRef.current === revisionAtSave) {
+        setDirty(false)
+        setSaveState('saved')
+      } else {
+        pendingRef.current = true
+        setSaveState('saving')
+      }
+    } catch (err) {
+      setSaveState('error')
+      setNotice(String(err))
+    } finally {
+      savingRef.current = false
+      if (pendingRef.current && revisionRef.current !== revisionAtSave) {
+        pendingRef.current = false
+        void persistNow()
+      }
+    }
+  }
+
+  function saveNow(): void {
+    void persistNow()
   }
 
   function handleInput(event: ChangeEvent<HTMLTextAreaElement>): void {
@@ -200,7 +272,7 @@ export function EditorApp() {
   function updateSettings(patch: Partial<Settings>, markAsked = false): void {
     const next = normalizeSettings({ ...settings, ...patch, autostartAsked: markAsked ? true : settings.autostartAsked })
     setSettings(next)
-    saveSettings(next)
+    void saveSettings(next)
   }
 
   function handleFile(event: ChangeEvent<HTMLInputElement>): void {
@@ -241,8 +313,9 @@ export function EditorApp() {
     window.close()
   }
 
-  function closeAfterSave(): void {
-    saveNow()
+  async function closeAfterSave(): Promise<void> {
+    await persistNow()
+    if (blockedRef.current || saveState === 'error') return
     setShowCloseConfirm(false)
     window.setTimeout(() => window.close(), 30)
   }
@@ -335,6 +408,7 @@ export function EditorApp() {
               ref={textareaRef}
               className="editor-textarea"
               defaultValue={text}
+              disabled={booting}
               spellCheck={false}
               onChange={handleInput}
               onCompositionStart={handleCompositionStart}

@@ -1,3 +1,10 @@
+use serde::Serialize;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::Manager;
+
 /// 桌面层布局：放在壁纸之上、普通窗口之下。
 /// Tauri 的 setAlwaysOnBottom 使用 HWND_BOTTOM，遇到动态壁纸（WorkerW）会被壁纸盖住，
 /// 因此这里直接把窗口插到桌面图标宿主（含 SHELLDLL_DefView 的 WorkerW）之上。
@@ -87,11 +94,253 @@ fn set_acrylic(window: tauri::WebviewWindow, enabled: bool) -> Result<(), String
     }
 }
 
+
+#[derive(Clone)]
+struct OpenFile {
+    path: PathBuf,
+    text: String,
+    meta: sotto_core::bytes::ByteMeta,
+    read_only_reason: Option<String>,
+}
+
+struct AppState {
+    current: Mutex<Option<OpenFile>>,
+    settings_path: PathBuf,
+    backups_dir: PathBuf,
+    default_file: PathBuf,
+}
+
+impl AppState {
+    fn new(app: &tauri::AppHandle) -> Result<Self, String> {
+        let config_dir = app.path().app_config_dir().map_err(|err| err.to_string())?;
+        let local_dir = app.path().app_local_data_dir().map_err(|err| err.to_string())?;
+        let documents = app.path().document_dir().map_err(|err| err.to_string())?;
+        fs::create_dir_all(&config_dir).map_err(|err| err.to_string())?;
+        fs::create_dir_all(&local_dir).map_err(|err| err.to_string())?;
+        Ok(Self {
+            current: Mutex::new(None),
+            settings_path: config_dir.join("settings.json"),
+            backups_dir: local_dir.join("backups"),
+            default_file: documents.join("Sotto.md"),
+        })
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotDto {
+    text: String,
+    path: String,
+    settings: serde_json::Value,
+    meta: Option<sotto_core::bytes::ByteMeta>,
+    read_only_reason: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveResult {
+    status: &'static str,
+    disk_hash: Option<String>,
+    meta: Option<sotto_core::bytes::ByteMeta>,
+    message: Option<String>,
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn read_settings(path: &Path) -> serde_json::Value {
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn load_file(path: &Path) -> Result<OpenFile, String> {
+    let bytes = fs::read(path).map_err(|err| format!("读取文件失败: {err}"))?;
+    let decoded = sotto_core::bytes::decode(&bytes)?;
+    Ok(OpenFile {
+        path: path.to_path_buf(),
+        text: decoded.text,
+        meta: decoded.meta,
+        read_only_reason: decoded.read_only_reason,
+    })
+}
+
+fn empty_file(path: PathBuf) -> Result<OpenFile, String> {
+    let decoded = sotto_core::bytes::decode(&[])?;
+    Ok(OpenFile {
+        path,
+        text: decoded.text,
+        meta: decoded.meta,
+        read_only_reason: decoded.read_only_reason,
+    })
+}
+
+fn ensure_current(state: &AppState) -> Result<OpenFile, String> {
+    let mut guard = state.current.lock().map_err(|_| "文件状态锁失效".to_string())?;
+    if let Some(file) = guard.as_ref() {
+        return Ok(file.clone());
+    }
+    let path = state.default_file.clone();
+    let file = if path.exists() {
+        load_file(&path)?
+    } else {
+        empty_file(path)?
+    };
+    *guard = Some(file.clone());
+    Ok(file)
+}
+
+fn snapshot(state: &AppState, file: &OpenFile) -> SnapshotDto {
+    SnapshotDto {
+        text: file.text.clone(),
+        path: file.path.to_string_lossy().into_owned(),
+        settings: read_settings(&state.settings_path),
+        meta: Some(file.meta.clone()),
+        read_only_reason: file.read_only_reason.clone(),
+    }
+}
+
+#[tauri::command]
+fn get_snapshot(state: tauri::State<'_, AppState>) -> Result<SnapshotDto, String> {
+    let file = ensure_current(&state)?;
+    Ok(snapshot(&state, &file))
+}
+
+#[tauri::command]
+fn open_markdown_file(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<SnapshotDto, String> {
+    let path = PathBuf::from(path);
+    let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    if !extension.eq_ignore_ascii_case("md") && !extension.eq_ignore_ascii_case("markdown") {
+        return Err("只支持 .md/.markdown 文件".into());
+    }
+    let file = load_file(&path)?;
+    *state.current.lock().map_err(|_| "文件状态锁失效".to_string())? = Some(file.clone());
+    Ok(snapshot(&state, &file))
+}
+
+#[tauri::command]
+fn save_markdown(
+    state: tauri::State<'_, AppState>,
+    base_disk_hash: String,
+    revision: u64,
+    content: String,
+) -> Result<SaveResult, String> {
+    let _ = revision;
+    let file = ensure_current(&state)?;
+    if file.read_only_reason.is_some() {
+        return Ok(SaveResult {
+            status: "error",
+            disk_hash: Some(file.meta.hash.clone()),
+            meta: Some(file.meta),
+            message: file.read_only_reason,
+        });
+    }
+    let disk_bytes = fs::read(&file.path).map_err(|err| format!("读取磁盘文件失败: {err}"))?;
+    let disk_hash = sotto_core::bytes::text_hash(&disk_bytes);
+    if disk_hash != base_disk_hash {
+        return Ok(SaveResult {
+            status: "conflict",
+            disk_hash: Some(disk_hash),
+            meta: None,
+            message: Some("磁盘文件已变化，未覆盖".into()),
+        });
+    }
+    if content.len() > 1_048_576 || content.lines().count() > 5000 {
+        return Ok(SaveResult {
+            status: "error",
+            disk_hash: Some(disk_hash),
+            meta: None,
+            message: Some("文件超过 1MB 或 5000 行，保存已拒绝".into()),
+        });
+    }
+    let encoded = sotto_core::bytes::encode_existing(&content, &file.meta)?;
+    if let Err(err) = sotto_core::backup::create_backup(
+        &state.backups_dir,
+        &file.path,
+        &disk_bytes,
+        &file.meta,
+        sotto_core::backup::BackupReason::BeforeWrite,
+        now_ms(),
+    ) {
+        eprintln!("sotto backup failed: {err}");
+    }
+    sotto_core::atomic::write_atomic(&file.path, &encoded)?;
+    let decoded = sotto_core::bytes::decode(&encoded)?;
+    let next = OpenFile {
+        path: file.path.clone(),
+        text: content,
+        meta: decoded.meta.clone(),
+        read_only_reason: None,
+    };
+    *state.current.lock().map_err(|_| "文件状态锁失效".to_string())? = Some(next);
+    Ok(SaveResult {
+        status: "ok",
+        disk_hash: Some(decoded.meta.hash.clone()),
+        meta: Some(decoded.meta),
+        message: None,
+    })
+}
+
+#[tauri::command]
+fn get_settings(state: tauri::State<'_, AppState>) -> serde_json::Value {
+    read_settings(&state.settings_path)
+}
+
+#[tauri::command]
+fn save_settings(
+    state: tauri::State<'_, AppState>,
+    settings: serde_json::Value,
+) -> Result<(), String> {
+    let json = serde_json::to_vec_pretty(&settings).map_err(|err| err.to_string())?;
+    sotto_core::atomic::write_atomic(&state.settings_path, &json)
+}
+
+#[tauri::command]
+fn open_editor(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("editor") {
+        window.show().map_err(|err| err.to_string())?;
+        window.set_focus().map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+    let window = tauri::WebviewWindowBuilder::new(
+        &app,
+        "editor",
+        tauri::WebviewUrl::App("editor.html".into()),
+    )
+    .title("Sotto · 编辑")
+    .inner_size(980.0, 680.0)
+    .min_inner_size(720.0, 480.0)
+    .build()
+    .map_err(|err| err.to_string())?;
+    window.set_focus().map_err(|err| err.to_string())?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![set_acrylic, set_desktop_layer])
+        .invoke_handler(tauri::generate_handler![
+            set_acrylic,
+            set_desktop_layer,
+            get_snapshot,
+            open_markdown_file,
+            save_markdown,
+            get_settings,
+            save_settings,
+            open_editor,
+        ])
         .setup(|app| {
+            let state = AppState::new(app.handle())
+                .map_err(|err| Box::<dyn std::error::Error>::from(err))?;
+            app.manage(state);
             let window = tauri::WebviewWindowBuilder::new(
                 app,
                 "main",

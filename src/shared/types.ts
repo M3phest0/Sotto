@@ -1,6 +1,23 @@
 export type Theme = 'dark' | 'acrylic'
 export type AutostartState = 'unset' | 'enabled' | 'disabled'
 
+export interface ByteMeta {
+  encoding: 'utf-8' | 'utf-16le' | 'utf-16be' | 'gbk'
+  hasBom: boolean
+  eol: 'crlf' | 'lf'
+  trailingNewline: boolean
+  hash: string
+  size: number
+  lineCount: number
+}
+
+export interface SaveResult {
+  status: 'ok' | 'conflict' | 'error'
+  diskHash: string | null
+  meta: ByteMeta | null
+  message: string | null
+}
+
 export interface Task {
   id: string
   index: number
@@ -56,6 +73,8 @@ export interface Snapshot {
   title: string | null
   tasks: Task[]
   settings: Settings
+  meta?: ByteMeta | null
+  readOnlyReason?: string | null
 }
 
 export interface EditorState {

@@ -8,8 +8,8 @@ import {
   openEditorWindow,
   saveSettings,
   subscribeToChanges,
-} from '../shared/mock'
-import { normalizeSettings } from '../shared/settings'
+} from '../shared/api'
+import { DEFAULT_SETTINGS, normalizeSettings } from '../shared/settings'
 import { setupDesktopLayer, startWindowDrag } from '../shared/desktop'
 import './widget.css'
 
@@ -19,27 +19,44 @@ function fileStem(path: string): string {
 }
 
 export function WidgetApp() {
-  const [snapshot, setSnapshot] = useState<Snapshot>(() => loadSnapshot())
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [expanded, setExpanded] = useState(false)
   const [atBottom, setAtBottom] = useState(false)
-  const [showFirstRun, setShowFirstRun] = useState(() => !loadSnapshot().settings.autostartAsked)
+  const [showFirstRun, setShowFirstRun] = useState(false)
   const [pulse, setPulse] = useState(false)
   const viewportRef = useRef<HTMLDivElement>(null)
   const lastToggleRef = useRef(0)
 
   useEffect(() => {
-    const unsubscribe = subscribeToChanges(() => setSnapshot(loadSnapshot()))
-    return unsubscribe
+    let active = true
+    const refresh = async () => {
+      try {
+        const next = await loadSnapshot()
+        if (!active) return
+        setSnapshot(next)
+        setShowFirstRun(!next.settings.autostartAsked)
+      } catch {
+        // 首次加载失败时保留加载态，避免误显示空文件。
+      }
+    }
+    void refresh()
+    const unsubscribe = subscribeToChanges(() => {
+      void refresh()
+    })
+    return () => {
+      active = false
+      unsubscribe()
+    }
   }, [])
 
   useEffect(() => {
-    void setupDesktopLayer(snapshot.settings.theme)
-  }, [snapshot.settings.theme])
+    if (snapshot) void setupDesktopLayer(snapshot.settings.theme)
+  }, [snapshot?.settings.theme])
 
   useEffect(() => {
     setAtBottom(false)
     if (viewportRef.current) viewportRef.current.scrollTop = 0
-  }, [expanded, snapshot.text])
+  }, [expanded, snapshot?.text])
 
   useEffect(() => {
     if (!pulse) return
@@ -47,8 +64,8 @@ export function WidgetApp() {
     return () => window.clearTimeout(timer)
   }, [pulse])
 
-  const settings = snapshot.settings
-  const allTasks = snapshot.tasks
+  const settings = snapshot?.settings ?? DEFAULT_SETTINGS
+  const allTasks = snapshot?.tasks ?? []
   const visibleTasks = useMemo(
     () => getVisibleTasks(allTasks, settings.hideCompleted),
     [allTasks, settings.hideCompleted],
@@ -57,7 +74,7 @@ export function WidgetApp() {
   const shownTasks = visibleTasks.slice(0, limit)
   const overflowCount = Math.max(0, visibleTasks.length - limit)
   const { completed, total } = getProgress(allTasks)
-  const title = snapshot.title ?? fileStem(snapshot.path)
+  const title = snapshot?.title ?? fileStem(snapshot?.path ?? '')
 
   const style = {
     '--widget-width': `${settings.width}px`,
@@ -87,7 +104,7 @@ export function WidgetApp() {
   }
 
   function openEditor() {
-    openEditorWindow()
+    void openEditorWindow()
   }
 
   function chooseAutostart(enabled: boolean) {
@@ -96,9 +113,9 @@ export function WidgetApp() {
       autostart: enabled ? 'enabled' : 'disabled',
       autostartAsked: true,
     })
-    saveSettings(next)
+    setSnapshot((current) => (current ? { ...current, settings: next } : current))
     setShowFirstRun(false)
-    setSnapshot(loadSnapshot())
+    void saveSettings(next)
   }
 
   function openEditorFromPrompt() {
@@ -107,9 +124,9 @@ export function WidgetApp() {
       autostart: 'disabled',
       autostartAsked: true,
     })
-    saveSettings(next)
-    setSnapshot(loadSnapshot())
+    setSnapshot((current) => (current ? { ...current, settings: next } : current))
     setShowFirstRun(false)
+    void saveSettings(next)
     openEditor()
   }
 
@@ -126,9 +143,19 @@ export function WidgetApp() {
   const emptyText = (() => {
     if (visibleTasks.length > 0) return null
     if (allTasks.length > 0) return '全部完成'
-    if (snapshot.text.trim().length === 0) return '文件为空 · 点铅笔打开编辑器'
+    if ((snapshot?.text ?? '').trim().length === 0) return '文件为空 · 点铅笔打开编辑器'
     return '没有任务 · 点铅笔打开编辑器'
   })()
+
+  if (!snapshot) {
+    return (
+      <div className={`widget-root theme-${settings.theme}`} data-testid="widget">
+        <div className="widget-card" style={style} data-testid="widget-card">
+          <div className="empty-state">加载中…</div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className={`widget-root theme-${settings.theme}`} data-testid="widget">
