@@ -22,6 +22,7 @@ import {
   pickMarkdownFile,
   saveMarkdown,
   saveSettings,
+  subscribeToChanges,
 } from '../shared/api'
 import { isTauri } from '../shared/desktop'
 import { DEFAULT_SETTINGS, normalizeSettings } from '../shared/settings'
@@ -75,6 +76,7 @@ export function EditorApp() {
   const savingRef = useRef(false)
   const pendingRef = useRef(false)
   const blockedRef = useRef(false)
+  const dirtyRef = useRef(false)
   const composingRef = useRef(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -172,6 +174,35 @@ export function EditorApp() {
     }, 250)
     return () => window.clearTimeout(timer)
   }, [text, revision])
+
+  useEffect(() => {
+    dirtyRef.current = dirty
+  }, [dirty])
+
+  useEffect(() => {
+    if (!useBackend) return
+    const unsubscribe = subscribeToChanges(() => {
+      void (async () => {
+        try {
+          const next = await loadBackendSnapshot()
+          const diskHash = next.meta?.hash ?? ''
+          if (!diskHash || diskHash === baseHashRef.current) return
+          if (dirtyRef.current) {
+            blockedRef.current = true
+            setConflictHash(diskHash)
+            setSaveState('error')
+            setNotice('磁盘文件已被外部修改，当前草稿未覆盖')
+          } else {
+            applySnapshot(next)
+            setNotice('已从磁盘同步')
+          }
+        } catch {
+          // 文件暂时不可读时保留当前内容，下一次保存会走冲突检测。
+        }
+      })()
+    })
+    return unsubscribe
+  }, [useBackend])
 
   useEffect(() => {
     if (!useBackend) return

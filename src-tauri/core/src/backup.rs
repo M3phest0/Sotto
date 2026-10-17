@@ -5,6 +5,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub const MAX_PER_SOURCE_BYTES: u64 = 200 * 1024 * 1024;
+pub const MAX_GLOBAL_BYTES: u64 = 1024 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BackupReason {
@@ -119,6 +122,7 @@ pub fn create_backup(
     let json = serde_json::to_vec_pretty(&manifest)
         .map_err(|err| format!("序列化备份 manifest 失败: {err}"))?;
     write_atomic(&manifest_path, &json)?;
+    let _ = enforce_global_limit(root, MAX_GLOBAL_BYTES);
     Ok(Some(backup_path))
 }
 
@@ -139,6 +143,74 @@ fn prune(dir: &Path, manifest: &mut Manifest, now_ms: u64) {
         }
     }
     manifest.entries = kept;
+    while manifest.entries.len() > 1
+        && manifest.entries.iter().map(|entry| entry.size as u64).sum::<u64>() > MAX_PER_SOURCE_BYTES
+    {
+        if let Some(entry) = manifest.entries.pop() {
+            let _ = fs::remove_file(dir.join(entry.file));
+        }
+    }
+}
+
+fn write_manifest(path: &Path, manifest: &Manifest) -> Result<(), String> {
+    let json = serde_json::to_vec_pretty(manifest)
+        .map_err(|err| format!("序列化备份 manifest 失败: {err}"))?;
+    write_atomic(path, &json)
+}
+
+/// Shrink all backup sources under `root` until the total size fits.
+/// Every source keeps at least one backup. Returns true if any file was removed.
+pub fn enforce_global_limit(root: &Path, max_bytes: u64) -> Result<bool, String> {
+    let mut sources: Vec<(PathBuf, Manifest)> = Vec::new();
+    let Ok(dirs) = fs::read_dir(root) else {
+        return Ok(false);
+    };
+    for entry in dirs.filter_map(Result::ok) {
+        let manifest_path = entry.path().join("manifest.json");
+        if !manifest_path.is_file() {
+            continue;
+        }
+        if let Ok(manifest) = read_manifest(&manifest_path) {
+            sources.push((manifest_path, manifest));
+        }
+    }
+
+    let mut removed = false;
+    loop {
+        let total: u64 = sources
+            .iter()
+            .flat_map(|(_, manifest)| manifest.entries.iter())
+            .map(|entry| entry.size as u64)
+            .sum();
+        if total <= max_bytes {
+            break;
+        }
+        let mut oldest: Option<(usize, usize, u64)> = None;
+        for (source_index, (_, manifest)) in sources.iter().enumerate() {
+            if manifest.entries.len() <= 1 {
+                continue;
+            }
+            if let Some((entry_index, entry)) = manifest
+                .entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.at_ms)
+            {
+                if oldest.map(|(_, _, at)| entry.at_ms < at).unwrap_or(true) {
+                    oldest = Some((source_index, entry_index, entry.at_ms));
+                }
+            }
+        }
+        let Some((source_index, entry_index, _)) = oldest else {
+            break;
+        };
+        let (manifest_path, manifest) = &mut sources[source_index];
+        let entry = manifest.entries.remove(entry_index);
+        let _ = fs::remove_file(manifest_path.parent().unwrap_or(root).join(entry.file));
+        write_manifest(manifest_path, manifest)?;
+        removed = true;
+    }
+    Ok(removed)
 }
 
 fn select_keep(entries: &[BackupEntry], now_ms: u64) -> BTreeSet<usize> {
@@ -193,6 +265,33 @@ mod tests {
         assert!(first.is_some());
         let second = create_backup(&root, &source, b"x\n", &meta(), BackupReason::BeforeWrite, 2).unwrap();
         assert!(second.is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn enforces_global_cap_but_keeps_each_source() {
+        let root = dir("global-cap");
+        let source_a = root.join("a.md");
+        let source_b = root.join("b.md");
+        fs::write(&source_a, b"x\n").unwrap();
+        fs::write(&source_b, b"y\n").unwrap();
+        for i in 0..6u64 {
+            let a = format!("a{i}\n");
+            let b = format!("b{i}\n");
+            create_backup(&root, &source_a, a.as_bytes(), &meta(), BackupReason::Interval, i * 60_000).unwrap();
+            create_backup(&root, &source_b, b.as_bytes(), &meta(), BackupReason::Interval, i * 60_000 + 1).unwrap();
+        }
+        enforce_global_limit(&root, 12).unwrap();
+        let total: u64 = [&source_a, &source_b]
+            .iter()
+            .map(|source| {
+                let manifest_path = backup_dir(&root, source).join("manifest.json");
+                let manifest: Manifest = serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
+                assert!(!manifest.entries.is_empty());
+                manifest.entries.iter().map(|entry| entry.size as u64).sum::<u64>()
+            })
+            .sum();
+        assert!(total <= 12, "total={total}");
         fs::remove_dir_all(root).unwrap();
     }
 
