@@ -4,7 +4,7 @@
 > 目标平台：Windows 11 x64（22H2 及以上）
 > 方案版本：v0.7
 > 更新日期：2026-10-18
-> 当前状态：P0 已通过；M1 前端完成；M2 开始
+> 当前状态：P0 已通过；M1 前端完成；M2 核心完成
 
 > P0 执行报告：[docs/P0-REPORT.md](docs/P0-REPORT.md)。焦点模式选 1；桌面层改为 Win32 `set_desktop_layer`；不再使用 `setAlwaysOnBottom`。
 
@@ -515,7 +515,8 @@ P0 已测：默认系统设置下，组件非前台时滚轮可用，`scrollTop`
 ```text
 Sotto/
 ├─ src-tauri/                 Rust 主进程
-│  ├─ src/lib.rs              启动、插件、托盘、快捷键
+│  ├─ src/lib.rs              启动、桌面层、命令、文件服务
+│  ├─ core/                    纯 Rust：bytes / atomic / backup（可在 Linux 测试）
 │  ├─ src/window.rs           置底、焦点模式、展开尺寸、亚克力
 │  ├─ src/bytes.rs            BOM/EOL/编码检测与转换
 │  ├─ src/atomic.rs           ReplaceFileW / MoveFileEx

@@ -1,6 +1,6 @@
 # Sotto · Win11 桌面便签组件
 
-当前进度：M1 前端完成；P0 已在 Win11 实机通过；M2 开始。
+当前进度：M1/P0 完成；M2 核心完成，剩余非阻塞收尾。
 
 设计方案：[Sotto.md](Sotto.md)  
 P0 报告：[docs/P0-REPORT.md](docs/P0-REPORT.md)
@@ -40,8 +40,8 @@ Windows P0 的隔离 Rust 环境见 [docs/DEV-ENV.md](docs/DEV-ENV.md)。
 - 主题：深色 / 亚克力；Tauri 用 `set_acrylic` 命令按主题开关，深色下关闭。
 - 桌面层：P0 验证的 `set_desktop_layer`，插到 WorkerW 桌面图标层之上、普通窗口之下；不使用 `setAlwaysOnBottom`。
 - 焦点：模式 1，`focusable(false)`；点击不抢焦点，非前台滚轮可用。
-- 数据层：TypeScript 任务解析器、设置校验、mock localStorage；Rust 后端在 M2 接入。
-- 测试：16 个 Vitest 用例 + 5 个 Playwright UI 用例；P0 真机矩阵见报告。
+- 数据层：Rust `sotto-core` 负责字节/EOL/BOM/编码/哈希、原子写和备份；Tauri 命令负责文件、watcher、设置和窗口。
+- 测试：14 个 Rust core 测试 + 16 个 Vitest + 5 个 Playwright UI；P0 真机矩阵见报告。
 - 截图：`docs/screenshots/`，含 `p0-*.png` 证据。
 
 ## P0 结果
@@ -54,15 +54,25 @@ Windows P0 的隔离 Rust 环境见 [docs/DEV-ENV.md](docs/DEV-ENV.md)。
 
 详见 [docs/P0-REPORT.md](docs/P0-REPORT.md)；操作记录见 [docs/P0-PROBE.md](docs/P0-PROBE.md)。
 
-## 下一步 M2
+## M2 状态
 
-1. Rust 字节/EOL/BOM/编码检测与原子替换。
-2. 保存状态机、单飞、冲突、watcher、备份。
-3. 编辑窗口多窗口、真实文件选择、设置持久化。
-4. 托盘/热键/自启/首启和 `set_desktop_layer` 生命周期。
+已完成：
+
+- 字节/EOL/BOM/编码检测、原始字节哈希、原子替换。
+- 单飞保存、pending 最新、冲突 UI、覆盖保存/重新加载。
+- 父目录 watcher、文件变化广播、组件自动刷新。
+- 写前/5 分钟/关闭编辑窗口备份、41 份裁剪、每源 200MB、全局 1GB。
+- 原生文件选择器、设置持久化、只读编码提示。
+- 编辑窗口真实 IPC 保存；浏览器仍走 mock。
+
+待收尾：
+
+- 设置 schema 迁移与编辑窗口 bounds 恢复。
+- 原生关闭按钮拦截、托盘/热键/自启。
+- Windows CI 最终验证。
 
 ## 限制
 
-- P0 仍只加载组件页；编辑窗口的 Tauri 多窗口和真实文件读写尚未接入，这是 M2 范围。
+- 编辑窗口已接真实 IPC；设置 schema 迁移、编辑窗口 bounds 和原生关闭拦截仍在 M2 收尾。
 - Playwright 只验证 Vite + mock IPC，不驱动 WebView2。
 - 未签名，Windows SmartScreen 可能提示。
