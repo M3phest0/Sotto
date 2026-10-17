@@ -17,6 +17,7 @@ import {
   saveDocumentText,
 } from '../shared/mock'
 import {
+  backupCurrent,
   loadSnapshot as loadBackendSnapshot,
   pickMarkdownFile,
   saveMarkdown,
@@ -66,6 +67,8 @@ export function EditorApp() {
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [showCloseConfirm, setShowCloseConfirm] = useState(false)
+  const [conflictHash, setConflictHash] = useState<string | null>(null)
+  const [readOnlyReason, setReadOnlyReason] = useState<string | null>(initial?.readOnlyReason ?? null)
   const [editorNonce, setEditorNonce] = useState(0)
   const revisionRef = useRef(0)
   const baseHashRef = useRef(initial?.meta?.hash ?? '')
@@ -115,6 +118,8 @@ export function EditorApp() {
     blockedRef.current = false
     savingRef.current = false
     pendingRef.current = false
+    setConflictHash(null)
+    setReadOnlyReason(next.readOnlyReason ?? null)
     if (next.readOnlyReason) setNotice(next.readOnlyReason)
   }
 
@@ -169,12 +174,20 @@ export function EditorApp() {
   }, [text, revision])
 
   useEffect(() => {
-    if (!dirty || composingRef.current || blockedRef.current) return
+    if (!useBackend) return
+    const timer = window.setInterval(() => {
+      void backupCurrent('interval')
+    }, 5 * 60 * 1000)
+    return () => window.clearInterval(timer)
+  }, [useBackend])
+
+  useEffect(() => {
+    if (!dirty || composingRef.current || blockedRef.current || readOnlyReason) return
     const timer = window.setTimeout(() => {
       void persistNow()
     }, 1000)
     return () => window.clearTimeout(timer)
-  }, [dirty, text])
+  }, [dirty, text, readOnlyReason])
 
   useEffect(() => {
     if (!notice) return
@@ -184,6 +197,10 @@ export function EditorApp() {
 
   async function persistNow(): Promise<void> {
     if (blockedRef.current) return
+    if (readOnlyReason) {
+      setNotice(readOnlyReason)
+      return
+    }
     if (savingRef.current) {
       pendingRef.current = true
       return
@@ -199,6 +216,7 @@ export function EditorApp() {
         const result = await saveMarkdown(baseHashRef.current, revisionAtSave, content)
         if (result.status === 'conflict') {
           blockedRef.current = true
+          setConflictHash(result.diskHash)
           setSaveState('error')
           setNotice(result.message ?? '磁盘文件已变化；未覆盖')
           return
@@ -213,6 +231,7 @@ export function EditorApp() {
       setLastSavedAt(Date.now())
       if (revisionRef.current === revisionAtSave) {
         setDirty(false)
+        setConflictHash(null)
         setSaveState('saved')
       } else {
         pendingRef.current = true
@@ -345,22 +364,45 @@ export function EditorApp() {
     event.currentTarget.value = ''
   }
 
+  async function reloadFromDisk(): Promise<void> {
+    try {
+      const next = await loadBackendSnapshot()
+      applySnapshot(next)
+      blockedRef.current = false
+      setConflictHash(null)
+      setNotice('已重新加载磁盘文件')
+    } catch (err) {
+      setNotice(String(err))
+    }
+  }
+
+  async function overwriteDisk(): Promise<void> {
+    if (!conflictHash) return
+    blockedRef.current = false
+    baseHashRef.current = conflictHash
+    setConflictHash(null)
+    await persistNow()
+  }
+
   function requestClose(): void {
     if (dirty) {
       setShowCloseConfirm(true)
       return
     }
+    if (useBackend) void backupCurrent('editor-close')
     window.close()
   }
 
   async function closeAfterSave(): Promise<void> {
     await persistNow()
     if (blockedRef.current || saveState === 'error') return
+    if (useBackend) await backupCurrent('editor-close')
     setShowCloseConfirm(false)
     window.setTimeout(() => window.close(), 30)
   }
 
   function closeWithoutSave(): void {
+    if (useBackend) void backupCurrent('editor-close')
     setShowCloseConfirm(false)
     window.close()
   }
@@ -404,7 +446,13 @@ export function EditorApp() {
               </option>
             ))}
           </select>
-          <button className="editor-button primary" type="button" onClick={saveNow}>
+          <button
+            className="editor-button primary"
+            type="button"
+            onClick={saveNow}
+            disabled={Boolean(readOnlyReason)}
+            title={readOnlyReason ?? '保存'}
+          >
             保存
           </button>
           <button className="editor-icon-button" type="button" aria-label="关闭编辑窗口" title="关闭" onClick={requestClose}>
@@ -419,6 +467,20 @@ export function EditorApp() {
           onChange={handleFile}
         />
       </header>
+
+      {readOnlyReason ? (
+        <div className="editor-readonly" role="status">
+          {readOnlyReason}
+        </div>
+      ) : null}
+
+      {conflictHash ? (
+        <div className="editor-conflict" role="alert">
+          <span>磁盘文件已被外部修改，当前草稿未覆盖。</span>
+          <button type="button" onClick={() => void reloadFromDisk()}>重新加载</button>
+          <button type="button" className="primary" onClick={() => void overwriteDisk()}>覆盖保存</button>
+        </div>
+      ) : null}
 
       <nav className="editor-tabs" aria-label="编辑与设置">
         <button

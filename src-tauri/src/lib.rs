@@ -160,10 +160,17 @@ fn now_ms() -> u64 {
 }
 
 fn read_settings(path: &Path) -> serde_json::Value {
-    fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_else(|| serde_json::json!({}))
+    let Ok(bytes) = fs::read(path) else {
+        return serde_json::json!({});
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(_) => {
+            let corrupt = path.with_file_name("settings.corrupt.json");
+            let _ = fs::copy(path, corrupt);
+            serde_json::json!({})
+        }
+    }
 }
 
 fn load_file(path: &Path) -> Result<OpenFile, String> {
@@ -384,6 +391,25 @@ fn save_settings(
 }
 
 #[tauri::command]
+fn backup_current(
+    state: tauri::State<'_, AppState>,
+    reason: sotto_core::backup::BackupReason,
+) -> Result<bool, String> {
+    let file = ensure_current(&state)?;
+    let bytes = fs::read(&file.path).map_err(|err| format!("读取备份源失败: {err}"))?;
+    let meta = sotto_core::bytes::decode(&bytes)?.meta;
+    let created = sotto_core::backup::create_backup(
+        &state.backups_dir,
+        &file.path,
+        &bytes,
+        &meta,
+        reason,
+        now_ms(),
+    )?;
+    Ok(created.is_some())
+}
+
+#[tauri::command]
 fn pick_markdown_file(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -434,6 +460,7 @@ pub fn run() {
             save_markdown,
             get_settings,
             save_settings,
+            backup_current,
             pick_markdown_file,
             open_editor,
         ])

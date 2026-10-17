@@ -69,6 +69,11 @@ export async function saveMarkdown(
   return invoke<SaveResult>('save_markdown', { baseDiskHash, revision, content })
 }
 
+export async function backupCurrent(reason: 'interval' | 'editor-close'): Promise<boolean> {
+  if (!isTauri()) return false
+  return invoke<boolean>('backup_current', { reason })
+}
+
 export async function openEditorWindow(): Promise<void> {
   if (!isTauri()) {
     openMockEditor()
