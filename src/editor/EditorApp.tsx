@@ -11,13 +11,14 @@ import { CloseIcon } from '../shared/icons'
 import { MarkdownInline } from '../shared/MarkdownInline'
 import { renderFullMarkdown } from '../shared/markdown'
 import { getProgress, parseTaskDocument } from '../shared/taskParser'
-import type { Settings, TaskDocument } from '../shared/types'
+import type { Settings, Snapshot, TaskDocument } from '../shared/types'
 import {
   loadSnapshot as loadMockSnapshot,
   saveDocumentText,
 } from '../shared/mock'
 import {
   loadSnapshot as loadBackendSnapshot,
+  pickMarkdownFile,
   saveMarkdown,
   saveSettings,
 } from '../shared/api'
@@ -98,21 +99,55 @@ export function EditorApp() {
     if (immediatePreview) commitPreview(nextText, rev)
   }
 
+  function applySnapshot(next: Snapshot): void {
+    setText(next.text)
+    setPath(next.path)
+    setSettings(next.settings)
+    setPreview(parseTaskDocument(next.text))
+    revisionRef.current = 0
+    setRevision(0)
+    setRenderedRevision(0)
+    baseHashRef.current = next.meta?.hash ?? ''
+    setDirty(false)
+    setSaveState('idle')
+    setLastSavedAt(null)
+    setEditorNonce((value) => value + 1)
+    blockedRef.current = false
+    savingRef.current = false
+    pendingRef.current = false
+    if (next.readOnlyReason) setNotice(next.readOnlyReason)
+  }
+
+  async function pickFile(): Promise<void> {
+    if (!useBackend) {
+      fileInputRef.current?.click()
+      return
+    }
+    try {
+      const next = await pickMarkdownFile()
+      if (!next) return
+      applySnapshot(next)
+      const updated = normalizeSettings({
+        ...next.settings,
+        lastFile: next.path,
+        recentFiles: [next.path, ...next.settings.recentFiles.filter((item) => item !== next.path)].slice(0, 5),
+      })
+      setSettings(updated)
+      void saveSettings(updated)
+      setNotice(`已加载 ${next.path}`)
+    } catch (err) {
+      setNotice(String(err))
+    }
+  }
+
   useEffect(() => {
     if (!useBackend) return
     let active = true
     void loadBackendSnapshot()
       .then((next) => {
         if (!active) return
-        setText(next.text)
-        setPath(next.path)
-        setSettings(next.settings)
-        setPreview(parseTaskDocument(next.text))
-        setRenderedRevision(revisionRef.current)
-        baseHashRef.current = next.meta?.hash ?? ''
+        applySnapshot(next)
         setBooting(false)
-        if (next.readOnlyReason) setNotice(next.readOnlyReason)
-        if (textareaRef.current) textareaRef.current.value = next.text
       })
       .catch((err) => {
         if (!active) return
@@ -348,9 +383,8 @@ export function EditorApp() {
           <button
             className="editor-button"
             type="button"
-            disabled={useBackend}
-            title={useBackend ? '原生文件选择器待接入' : '选择 Markdown 文件'}
-            onClick={() => fileInputRef.current?.click()}
+            title="选择 Markdown 文件"
+            onClick={() => void pickFile()}
           >
             选择文件
           </button>

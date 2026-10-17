@@ -44,6 +44,12 @@ export async function openMarkdownFile(path: string): Promise<Snapshot> {
   return mapSnapshot(raw)
 }
 
+export async function pickMarkdownFile(): Promise<Snapshot | null> {
+  if (!isTauri()) return null
+  const raw = await invoke<RawSnapshot | null>('pick_markdown_file')
+  return raw ? mapSnapshot(raw) : null
+}
+
 export async function saveSettings(settings: Settings): Promise<void> {
   if (!isTauri()) {
     saveMockSettings(settings)

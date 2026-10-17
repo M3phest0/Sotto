@@ -1,7 +1,8 @@
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 
@@ -108,6 +109,9 @@ struct AppState {
     settings_path: PathBuf,
     backups_dir: PathBuf,
     default_file: PathBuf,
+    watcher: Mutex<Option<RecommendedWatcher>>,
+    watched_path: Mutex<Option<PathBuf>>,
+    last_hash: Arc<Mutex<String>>,
 }
 
 impl AppState {
@@ -122,6 +126,9 @@ impl AppState {
             settings_path: config_dir.join("settings.json"),
             backups_dir: local_dir.join("backups"),
             default_file: documents.join("Sotto.md"),
+            watcher: Mutex::new(None),
+            watched_path: Mutex::new(None),
+            last_hash: Arc::new(Mutex::new(String::new())),
         })
     }
 }
@@ -205,9 +212,60 @@ fn snapshot(state: &AppState, file: &OpenFile) -> SnapshotDto {
     }
 }
 
+fn set_last_hash(state: &AppState, hash: &str) {
+    if let Ok(mut guard) = state.last_hash.lock() {
+        *guard = hash.to_string();
+    }
+}
+
+fn ensure_watcher(app: &tauri::AppHandle, state: &AppState, path: &Path) -> Result<(), String> {
+    {
+        let watched = state.watched_path.lock().map_err(|_| "watcher 锁失效".to_string())?;
+        let has_watcher = state.watcher.lock().map_err(|_| "watcher 锁失效".to_string())?.is_some();
+        if has_watcher && watched.as_deref() == Some(path) {
+            return Ok(());
+        }
+    }
+
+    let parent = path.parent().ok_or("文件没有父目录")?.to_path_buf();
+    let watched_path = path.to_path_buf();
+    let last_hash = state.last_hash.clone();
+    let app_handle = app.clone();
+    let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+        let Ok(event) = result else { return };
+        if !event.paths.iter().any(|candidate| candidate == &watched_path) {
+            return;
+        }
+        let next_hash = fs::read(&watched_path)
+            .ok()
+            .map(|bytes| sotto_core::bytes::text_hash(&bytes));
+        let Ok(mut known) = last_hash.lock() else { return };
+        let changed = next_hash.as_deref() != Some(known.as_str());
+        if let Some(hash) = next_hash {
+            *known = hash;
+        }
+        drop(known);
+        if changed {
+            let _ = app_handle.emit("file-changed", ());
+        }
+    })
+    .map_err(|err| format!("创建文件监听失败: {err}"))?;
+    watcher
+        .watch(&parent, RecursiveMode::NonRecursive)
+        .map_err(|err| format!("监听目录失败: {err}"))?;
+    *state.watcher.lock().map_err(|_| "watcher 锁失效".to_string())? = Some(watcher);
+    *state.watched_path.lock().map_err(|_| "watcher 锁失效".to_string())? = Some(path.to_path_buf());
+    Ok(())
+}
+
 #[tauri::command]
-fn get_snapshot(state: tauri::State<'_, AppState>) -> Result<SnapshotDto, String> {
+fn get_snapshot(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<SnapshotDto, String> {
     let file = ensure_current(&state)?;
+    set_last_hash(&state, &file.meta.hash);
+    ensure_watcher(&app, &state, &file.path)?;
     Ok(snapshot(&state, &file))
 }
 
@@ -224,6 +282,8 @@ fn open_markdown_file(
     }
     let file = load_file(&path)?;
     *state.current.lock().map_err(|_| "文件状态锁失效".to_string())? = Some(file.clone());
+    set_last_hash(&state, &file.meta.hash);
+    ensure_watcher(&app, &state, &file.path)?;
     let _ = app.emit("file-changed", ());
     Ok(snapshot(&state, &file))
 }
@@ -295,6 +355,8 @@ fn save_markdown(
         read_only_reason: None,
     };
     *state.current.lock().map_err(|_| "文件状态锁失效".to_string())? = Some(next);
+    set_last_hash(&state, &decoded.meta.hash);
+    let _ = ensure_watcher(&app, &state, &file.path);
     let _ = app.emit("file-changed", ());
     Ok(SaveResult {
         status: "ok",
@@ -319,6 +381,25 @@ fn save_settings(
     sotto_core::atomic::write_atomic(&state.settings_path, &json)?;
     let _ = app.emit("file-changed", ());
     Ok(())
+}
+
+#[tauri::command]
+fn pick_markdown_file(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<SnapshotDto>, String> {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("Markdown", &["md", "markdown"])
+        .pick_file()
+    else {
+        return Ok(None);
+    };
+    let file = load_file(&path)?;
+    *state.current.lock().map_err(|_| "文件状态锁失效".to_string())? = Some(file.clone());
+    set_last_hash(&state, &file.meta.hash);
+    ensure_watcher(&app, &state, &file.path)?;
+    let _ = app.emit("file-changed", ());
+    Ok(Some(snapshot(&state, &file)))
 }
 
 #[tauri::command]
@@ -353,6 +434,7 @@ pub fn run() {
             save_markdown,
             get_settings,
             save_settings,
+            pick_markdown_file,
             open_editor,
         ])
         .setup(|app| {
