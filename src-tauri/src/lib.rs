@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// 桌面层布局：放在壁纸之上、普通窗口之下。
 /// Tauri 的 setAlwaysOnBottom 使用 HWND_BOTTOM，遇到动态壁纸（WorkerW）会被壁纸盖住，
@@ -213,6 +213,7 @@ fn get_snapshot(state: tauri::State<'_, AppState>) -> Result<SnapshotDto, String
 
 #[tauri::command]
 fn open_markdown_file(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     path: String,
 ) -> Result<SnapshotDto, String> {
@@ -223,11 +224,13 @@ fn open_markdown_file(
     }
     let file = load_file(&path)?;
     *state.current.lock().map_err(|_| "文件状态锁失效".to_string())? = Some(file.clone());
+    let _ = app.emit("file-changed", ());
     Ok(snapshot(&state, &file))
 }
 
 #[tauri::command]
 fn save_markdown(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     base_disk_hash: String,
     revision: u64,
@@ -243,7 +246,12 @@ fn save_markdown(
             message: file.read_only_reason,
         });
     }
-    let disk_bytes = fs::read(&file.path).map_err(|err| format!("读取磁盘文件失败: {err}"))?;
+    let exists = file.path.exists();
+    let disk_bytes = if exists {
+        fs::read(&file.path).map_err(|err| format!("读取磁盘文件失败: {err}"))?
+    } else {
+        Vec::new()
+    };
     let disk_hash = sotto_core::bytes::text_hash(&disk_bytes);
     if disk_hash != base_disk_hash {
         return Ok(SaveResult {
@@ -261,16 +269,22 @@ fn save_markdown(
             message: Some("文件超过 1MB 或 5000 行，保存已拒绝".into()),
         });
     }
-    let encoded = sotto_core::bytes::encode_existing(&content, &file.meta)?;
-    if let Err(err) = sotto_core::backup::create_backup(
-        &state.backups_dir,
-        &file.path,
-        &disk_bytes,
-        &file.meta,
-        sotto_core::backup::BackupReason::BeforeWrite,
-        now_ms(),
-    ) {
-        eprintln!("sotto backup failed: {err}");
+    let encoded = if exists {
+        sotto_core::bytes::encode_existing(&content, &file.meta)?
+    } else {
+        sotto_core::bytes::encode_new(&content)
+    };
+    if exists {
+        if let Err(err) = sotto_core::backup::create_backup(
+            &state.backups_dir,
+            &file.path,
+            &disk_bytes,
+            &file.meta,
+            sotto_core::backup::BackupReason::BeforeWrite,
+            now_ms(),
+        ) {
+            eprintln!("sotto backup failed: {err}");
+        }
     }
     sotto_core::atomic::write_atomic(&file.path, &encoded)?;
     let decoded = sotto_core::bytes::decode(&encoded)?;
@@ -281,6 +295,7 @@ fn save_markdown(
         read_only_reason: None,
     };
     *state.current.lock().map_err(|_| "文件状态锁失效".to_string())? = Some(next);
+    let _ = app.emit("file-changed", ());
     Ok(SaveResult {
         status: "ok",
         disk_hash: Some(decoded.meta.hash.clone()),
@@ -296,11 +311,14 @@ fn get_settings(state: tauri::State<'_, AppState>) -> serde_json::Value {
 
 #[tauri::command]
 fn save_settings(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     settings: serde_json::Value,
 ) -> Result<(), String> {
     let json = serde_json::to_vec_pretty(&settings).map_err(|err| err.to_string())?;
-    sotto_core::atomic::write_atomic(&state.settings_path, &json)
+    sotto_core::atomic::write_atomic(&state.settings_path, &json)?;
+    let _ = app.emit("file-changed", ());
+    Ok(())
 }
 
 #[tauri::command]

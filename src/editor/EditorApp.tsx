@@ -276,6 +276,11 @@ export function EditorApp() {
   }
 
   function handleFile(event: ChangeEvent<HTMLInputElement>): void {
+    if (useBackend) {
+      event.currentTarget.value = ''
+      setNotice('Windows 原生文件选择器将在 M2 后半段接入')
+      return
+    }
     const file = event.currentTarget.files?.[0]
     if (!file) return
     const reader = new FileReader()
@@ -340,7 +345,13 @@ export function EditorApp() {
           </span>
         </div>
         <div className="editor-actions">
-          <button className="editor-button" type="button" onClick={() => fileInputRef.current?.click()}>
+          <button
+            className="editor-button"
+            type="button"
+            disabled={useBackend}
+            title={useBackend ? '原生文件选择器待接入' : '选择 Markdown 文件'}
+            onClick={() => fileInputRef.current?.click()}
+          >
             选择文件
           </button>
           <select
