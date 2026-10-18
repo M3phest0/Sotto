@@ -10,7 +10,7 @@ import {
 import { CloseIcon } from '../shared/icons'
 import { MarkdownInline } from '../shared/MarkdownInline'
 import { renderFullMarkdown } from '../shared/markdown'
-import { getProgress, listContinuation, parseTaskDocument, taskSubtree } from '../shared/taskParser'
+import { getProgress, listContinuation, parseTaskDocument, taskSubtree, toggleTaskAtLine } from '../shared/taskParser'
 import type { Settings, Snapshot, TaskDocument } from '../shared/types'
 import {
   loadSnapshot as loadMockSnapshot,
@@ -19,6 +19,7 @@ import {
 import {
   applyAutostart,
   backupCurrent,
+  clearDraft,
   getAutostartStatus,
   loadSnapshot as loadBackendSnapshot,
   newMarkdownFile,
@@ -31,6 +32,7 @@ import {
   saveMarkdownAs,
   saveSettings,
   subscribeToChanges,
+  syncDraft,
 } from '../shared/api'
 import { listen } from '@tauri-apps/api/event'
 import { isTauri } from '../shared/desktop'
@@ -47,12 +49,6 @@ function fileStem(path: string): string {
   return base.replace(/\.(md|markdown)$/i, '') || 'Sotto'
 }
 
-function lineOffset(source: string, line: number): number {
-  const lines = source.split('\n')
-  let offset = 0
-  for (let i = 0; i < line; i += 1) offset += lines[i].length + 1
-  return offset
-}
 
 function statusLabel(state: SaveState): string {
   if (state === 'saving') return '保存中'
@@ -103,6 +99,7 @@ export function EditorApp() {
   const blockedRef = useRef(false)
   const saveErrorRef = useRef(false)
   const dirtyRef = useRef(false)
+  const cascadeUndoRef = useRef<{ before: string; after: string } | null>(null)
   const composingRef = useRef(false)
   const exitAfterCloseRef = useRef(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -430,6 +427,16 @@ export function EditorApp() {
   }, [dirty, text, readOnlyReason, missing, compositionTick])
 
   useEffect(() => {
+    if (!useBackend || !dirty || readOnlyReason || missing) return
+    const timer = window.setTimeout(() => {
+      if (!composingRef.current) {
+        void syncDraft(text, baseHashRef.current).catch(() => {})
+      }
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [text, dirty, useBackend, readOnlyReason, missing, compositionTick])
+
+  useEffect(() => {
     if (!notice) return
     const timer = window.setTimeout(() => setNotice(null), 2400)
     return () => window.clearTimeout(timer)
@@ -477,6 +484,7 @@ export function EditorApp() {
         baseHashRef.current = result.diskHash ?? ''
       }
       setLastSavedAt(Date.now())
+      void clearDraft()
       if (revisionRef.current === revisionAtSave) {
         setDirty(false)
         setConflictHash(null)
@@ -530,6 +538,11 @@ export function EditorApp() {
       } catch {
         // 备份失败不阻塞关闭；下次启动仍可从未备份的磁盘内容读取。
       }
+      try {
+        await clearDraft()
+      } catch {
+        // 清理失败时后端会话结束会看到旧草稿；下次保存会覆盖它。
+      }
       if (exitAfterCloseRef.current) {
         await quitApp()
         return
@@ -582,11 +595,13 @@ export function EditorApp() {
   }
 
   function handleInput(event: ChangeEvent<HTMLTextAreaElement>): void {
+    cascadeUndoRef.current = null
     markChanged(event.currentTarget.value)
   }
 
   function handleCompositionStart(): void {
     composingRef.current = true
+    cascadeUndoRef.current = null
     // 取消已经排队的自动保存；组合结束时会重新排队。
     if (autosaveTimerRef.current !== null) {
       window.clearTimeout(autosaveTimerRef.current)
@@ -602,6 +617,23 @@ export function EditorApp() {
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
+    // setRangeText 一次替换整棵树在某些 WebView2 版本中不会进入原生撤销栈；
+    // 级联勾选单独记一笔，Ctrl+Z 时原样还原整棵树。
+    if (
+      (event.ctrlKey || event.metaKey) &&
+      event.key.toLowerCase() === 'z' &&
+      !event.shiftKey
+    ) {
+      const undo = cascadeUndoRef.current
+      const el = event.currentTarget
+      if (undo && el.value === undo.after) {
+        event.preventDefault()
+        el.setRangeText(undo.before, 0, el.value.length, 'preserve')
+        cascadeUndoRef.current = null
+        markChanged(el.value, true)
+        return
+      }
+    }
     if (event.key === 'Tab') {
       event.preventDefault()
       const el = event.currentTarget
@@ -684,27 +716,31 @@ export function EditorApp() {
 
   function togglePreviewTask(index: number, checked: boolean): void {
     if (composingRef.current) return
+    const oldTask = preview.tasks.find((item) => item.index === index)
+    // 输入后预览还没刷新时，直接按当前草稿解析，避免吞掉第一次点击。
+    const currentPreview = renderedRevision === revision ? preview : parseTaskDocument(text)
     if (renderedRevision !== revision) {
-      commitPreview(text, revision)
-      setNotice('预览已刷新，请再点一次')
-      return
+      setPreview(currentPreview)
+      setRenderedRevision(revision)
     }
-    const task = preview.tasks.find((item) => item.index === index)
+    // 按旧索引对应的源行定位任务，避免输入导致 index 变化时点错。
+    const task = currentPreview.tasks.find((item) => item.line === oldTask?.line)
+      ?? currentPreview.tasks.find((item) => item.index === index)
     const el = textareaRef.current
     if (!task || !el) return
     const source = el.value
-    el.focus()
-    // 父项勾选/取消时同步整棵子任务；复选框等长替换，行偏移保持不变。
-    for (const target of taskSubtree(preview.tasks, task.id)) {
-      const offset = lineOffset(source, target.line)
-      const rest = source.slice(offset)
-      const nextNewline = rest.indexOf('\n')
-      const lineText = nextNewline === -1 ? rest : rest.slice(0, nextNewline)
-      const checkboxMatch = /\[[ xX]\]/.exec(lineText)
-      if (!checkboxMatch) continue
-      const checkboxOffset = offset + (checkboxMatch.index ?? 0)
-      el.setRangeText(checked ? '[x]' : '[ ]', checkboxOffset, checkboxOffset + 3, 'end')
+    let nextSource = source
+    for (const target of taskSubtree(currentPreview.tasks, task.id)) {
+      nextSource = toggleTaskAtLine(nextSource, target.line, checked)
     }
+    if (nextSource === source) return
+    const start = el.selectionStart
+    const end = el.selectionEnd
+    el.focus()
+    // 整段替换只生成一个原生撤销步骤，Ctrl+Z 可一次还原父项和全部子项。
+    el.setRangeText(nextSource, 0, source.length, 'preserve')
+    el.setSelectionRange(Math.min(start, nextSource.length), Math.min(end, nextSource.length))
+    cascadeUndoRef.current = { before: source, after: nextSource }
     markChanged(el.value, true)
   }
 

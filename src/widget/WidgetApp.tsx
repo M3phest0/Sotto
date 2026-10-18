@@ -9,7 +9,7 @@ import {
 } from 'react'
 import { GripIcon, LockIcon, PencilIcon, CheckIcon, CloseIcon } from '../shared/icons'
 import { MarkdownInline } from '../shared/MarkdownInline'
-import { getProgress, getVisibleTasks } from '../shared/taskParser'
+import { getProgress, getVisibleContent } from '../shared/taskParser'
 import type { Snapshot } from '../shared/types'
 import {
   applyAutostart,
@@ -79,13 +79,9 @@ export function WidgetApp() {
   const settings = snapshot?.settings ?? DEFAULT_SETTINGS
   const allTasks = snapshot?.tasks ?? []
   // 组件显示原文本的前几行：任务行带状态，普通文本行原样展示。
-  const visibleTaskIds = useMemo(
-    () => new Set(getVisibleTasks(allTasks, settings.hideCompleted).map((task) => task.id)),
-    [allTasks, settings.hideCompleted],
-  )
   const visibleLines = useMemo(
-    () => (snapshot?.content ?? []).filter((line) => !line.task || visibleTaskIds.has(line.task.id)),
-    [snapshot?.content, visibleTaskIds],
+    () => getVisibleContent(snapshot?.content ?? [], allTasks, settings.hideCompleted),
+    [snapshot?.content, allTasks, settings.hideCompleted],
   )
   const limit = expanded ? settings.expanded : settings.compact
   const shownLines = visibleLines.slice(0, limit)
@@ -204,7 +200,7 @@ export function WidgetApp() {
     if (missing) return '文件不存在 · 请重新选择'
     if (readError) return '读取失败 · 打开编辑器查看'
     if (visibleLines.length === 0) {
-      return allTasks.length > 0 ? '全部完成' : '打开编辑器'
+      return allTasks.length > 0 && allTasks.every((task) => task.text.trim().length > 0) ? '全部完成' : '打开编辑器'
     }
     if (!expanded && overflowCount === 0) return '点击展开'
     if (expanded && overflowCount === 0) return '点击收起'
@@ -216,7 +212,7 @@ export function WidgetApp() {
     if (missing) return '文件不存在 · 点铅笔重新选择'
     if (visibleLines.length > 0) return null
     if (readError) return '无法读取文件 · 打开编辑器查看详情'
-    if (allTasks.length > 0) return '全部完成'
+    if (allTasks.length > 0 && allTasks.every((task) => task.text.trim().length > 0)) return '全部完成'
     if ((snapshot?.text ?? '').trim().length === 0) return '文件为空 · 点铅笔打开编辑器'
     return '没有任务 · 点铅笔打开编辑器'
   })()

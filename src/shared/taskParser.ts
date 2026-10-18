@@ -284,6 +284,38 @@ export function getVisibleTasks(tasks: Task[], hideCompleted: boolean): Task[] {
   return tasks.filter((task) => !hidden.has(task.id))
 }
 
+/**
+ * Filter display lines by hide-completed. Plain text lines inherit the
+ * nearest enclosing task; a note under a hidden completed task must disappear
+ * with that task instead of becoming an orphan row.
+ */
+export function getVisibleContent(
+  content: DisplayLine[],
+  tasks: Task[],
+  hideCompleted: boolean,
+): DisplayLine[] {
+  if (!hideCompleted) return content
+  const visible = new Set(getVisibleTasks(tasks, hideCompleted).map((task) => task.id))
+  const taskIndex = new Map(tasks.map((task, index) => [task.id, index]))
+  const hiddenRanges: Array<[number, number]> = []
+  for (const task of tasks) {
+    if (visible.has(task.id)) continue
+    const index = taskIndex.get(task.id) ?? 0
+    let end = Infinity
+    for (let i = index + 1; i < tasks.length; i += 1) {
+      if (tasks[i].depth <= task.depth) {
+        end = tasks[i].line
+        break
+      }
+    }
+    hiddenRanges.push([task.line, end])
+  }
+  return content.filter((line) => {
+    if (line.task && !visible.has(line.task.id)) return false
+    return !hiddenRanges.some(([start, end]) => line.line > start && line.line < end)
+  })
+}
+
 export function findTaskByLine(tasks: Task[], lineIndex: number): Task | undefined {
   return tasks.find((task) => task.line === lineIndex)
 }

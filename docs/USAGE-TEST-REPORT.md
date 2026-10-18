@@ -12,7 +12,7 @@
 
 > 修复状态（2026-10-18）：第一轮 P0-1、P0-2、P0-3、P1-4 已修复；第二轮 R2-P1-1、R2-P1-2 及除 R2-P2-8 外的 P2/P3 已修复，详见第 11、13 节。会话结束强制落盘（R2-P2-8）仍待原生窗口过程接入。
 
-最终测试结果：28 个 Vitest（28 passed）、18 个 Rust 测试（core 15 + 窗口几何 3）、48 个 Playwright 用例（44 passed / 4 skipped，跳过项为第一轮既有的 fixme），并做了一轮 Windows 原生验证（快捷键、托盘、单实例、自启、亚克力、窗口行为）。
+最终测试结果：28 个 Vitest（28 passed）、15 个 Rust core + 4 个窗口几何测试、48 个 Playwright 用例（48 passed），并做了一轮 Windows 原生验证（快捷键、托盘、单实例、自启、亚克力、窗口行为）。
 
 **最需要先修的问题：**
 
@@ -594,3 +594,30 @@ pnpm tauri build --no-bundle
 - 原生展开态没有做鼠标点击实测（桌面层窗口会被其他窗口遮挡，`PostMessage` 也未触发 React 点击）；展开高度由浏览器用例和 Rust 几何单元测试覆盖。
 - 窗口位置持久化（第一轮 P1-2）仍未实现；本轮只让“重置位置”真正移动窗口。
 - `save_markdown_as` 对不支持编码的目标文件按 UTF-8 新文件写入；支持编码的目标文件会保留原 EOL/BOM。
+
+
+---
+
+## 14. 第三轮剩余缺陷修复（2026-10-18）
+
+本轮把第一轮最后 4 个 `test.fixme` 转为正式回归，并补了两项结构性缺口：
+
+| 项 | 状态 | 实现 / 验证 |
+| --- | --- | --- |
+| 已完成父项下的备注文字 | 已修复 | `getVisibleContent` 按隐藏子树的源行范围过滤普通文本；回归转正 |
+| 级联勾选撤销 | 已修复 | 勾选一次替换整棵树，另存一笔级联撤销快照；Ctrl+Z 一次还原；回归转正 |
+| 快速输入后首次点击预览任务 | 已修复 | 预览 revision 过期时先按当前草稿解析，再应用勾选，不吞第一次点击；回归转正 |
+| 只有空任务时误报全部完成 | 已修复 | 空任务不计入“全部完成”空态；回归转正 |
+| 组件位置持久化 | 已修复 | Moved/Resized 900ms 防抖写 `windowPosition`；启动按显示器/工作区夹回；Rust 单测覆盖夹回 |
+| 关机/注销落盘 | 已实现，待原生复测 | 编辑器每 250ms 镜像草稿到 Rust；主窗口 `WM_QUERYENDSESSION` 子类化后原子写回并备份；冲突则拒绝覆盖并记录 |
+
+验证：
+
+- Vitest：28 passed
+- Rust core：15 passed
+- Playwright：48 passed / 0 skipped
+- `pnpm build`：通过
+- `cargo check --target x86_64-pc-windows-gnu`：通过
+- 主 crate 窗口几何测试：4 个，已加入 Windows CI
+
+未完成：`WM_QUERYENDSESSION` 的 Win11 关机/注销实机复测；DPI/多屏/RDP/UIPI 组合验收；系统透明 effective theme；代码签名与 License。

@@ -28,7 +28,7 @@
 | 18 | 深色/亚克力/effective theme/回退通知 | 部分 | 双主题与亚克力实机通过；未读取系统 `EnableTransparency`，无 effective theme 回退通知 |
 | 19 | 150%/200% DPI、多屏、拔插夹回 | 部分 | 本机单屏 bounds 恢复通过；缩放/拔插矩阵未复测 |
 | 20 | Win+D 后保持桌面层可见 | 通过 | P0 结论 |
-| 21 | 解锁/唤醒/RDP/Explorer 恢复；`WM_QUERYENDSESSION` | 部分 | 未实现 `WM_QUERYENDSESSION` 处理器；其余场景未复测 |
+| 21 | 解锁/唤醒/RDP/Explorer 恢复；`WM_QUERYENDSESSION` | 部分 | 已接入 250ms 草稿镜像 + `WM_QUERYENDSESSION` 窗口过程；Win11 关机/注销运行时尚未复测；其余场景未复测 |
 | 22 | 5000 行/1MB 基准或任务视图；bounds 恢复 | 通过 | >2000 行/512KB 直接任务视图；1.26MB/5201 行读取成功并只读；bounds 精确恢复 |
 | 23 | exe ≤15MB；内存 ≤120MB；CPU <1%；启动 ≤3s | 通过（按私有工作集口径） | exe 3.96MB；启动 102ms（热）/899ms（冷）；空闲 CPU 0.055%；应用 + WebView2 私有工作集 74MB（仅组件）/ 108MB（编辑窗口打开），私有字节 112MB；整树 WS 340MB（含共享 DLL 重复计数） |
 
@@ -46,5 +46,6 @@
 - 内存口径：按 Task Manager 的私有工作集计 74MB，达标；整树 WS 340MB 仍偏高是因为共享 DLL 在每个进程中重复计数。若验收要求整树 WS ≤120MB，需要换原生 UI。
 - 只读提示文案已去掉“另存为”；当前不提供另存为入口。
 - 系统透明关闭时未读取 `EnableTransparency` 切换 effective theme。
-- 未处理 `WM_QUERYENDSESSION`；关机前不会主动落盘。
+- `WM_QUERYENDSESSION` 已实现，但尚未在 Win11 关机/注销场景复测；草稿镜像最多滞后 250ms。
+- 窗口位置持久化已实现；多屏/DPI 拔插组合仍未复测。
 - 中文 IME、150%/200% DPI、多屏拔插、UIPI、休眠/RDP 恢复未在本轮复测。

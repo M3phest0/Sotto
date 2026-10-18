@@ -121,9 +121,8 @@ test('title heading is not repeated as a content row', async ({ page }) => {
   expect(texts).toEqual(['a', '小节'])
 })
 
-// 已知缺陷：已完成父任务被隐藏后，其下的普通文本行仍然显示，成为无上下文的孤立行。
-// 修复后此测试应转为普通 test。参见 docs/USAGE-TEST-REPORT.md。
-test.fixme('note text under a hidden completed task is hidden with its parent', async ({ page }) => {
+// 回归：注释行必须跟随被隐藏的已完成父项一起隐藏。
+test('note text under a hidden completed task is hidden with its parent', async ({ page }) => {
   await openWidget(page, '- [x] 完成父项\n  隐藏备注\n- [ ] 其他\n', { hideCompleted: true })
   const texts = await page.locator('.task-row .task-text').allTextContents()
   expect(texts).toEqual(['其他'])
@@ -224,9 +223,8 @@ test('editor plain-text Enter is a normal newline', async ({ page }) => {
   await expect(textarea).toHaveValue('普通文本\n\n- [ ] a\n')
 })
 
-// 已知缺陷：级联勾选使用 setRangeText 逐行改写，Ctrl+Z 不能把整棵子树一次还原。
-// 修复后此测试应转为普通 test。参见 docs/USAGE-TEST-REPORT.md。
-test.fixme('editor undo after cascade restores every child', async ({ page }) => {
+// 回归：级联勾选后 Ctrl+Z 必须一次还原整棵子树。
+test('editor undo after cascade restores every child', async ({ page }) => {
   await page.addInitScript(() => {
     localStorage.clear()
     localStorage.setItem('sotto:autostart-asked', '1')
@@ -335,9 +333,8 @@ test('editor autosave persists typed text', async ({ page }) => {
   expect(stored).toBe('- [ ] a\n追加一行\n')
 })
 
-// 已知缺陷：输入后 250ms 内点击预览里的任务，第一次点击只刷新预览并提示“请再点一次”，
-// 用户的勾选意图被吞掉。修复后此测试应转为普通 test。参见 docs/USAGE-TEST-REPORT.md。
-test.fixme('rapid typing then toggling a preview task applies on first click', async ({ page }) => {
+// 回归：输入后 250ms 内点击预览任务，第一次点击必须生效。
+test('rapid typing then toggling a preview task applies on first click', async ({ page }) => {
   await page.addInitScript(() => {
     localStorage.clear()
     localStorage.setItem('sotto:autostart-asked', '1')
@@ -355,11 +352,11 @@ test.fixme('rapid typing then toggling a preview task applies on first click', a
   await expect(textarea).toHaveValue('- [x] ab\n')
 })
 
-// 已知缺陷：只有空任务时进度为 0/2，却显示“全部完成”。修复后此测试应转为普通 test。
-test.fixme('empty tasks only do not claim completion', async ({ page }) => {
+// 回归：只有空任务时不得显示“全部完成”。
+test('empty tasks only do not claim completion', async ({ page }) => {
   await openWidget(page, '- [ ] \n- [ ] \n')
   await expect(page.locator('.widget-progress')).toHaveText('0/2')
-  await expect(page.getByTestId('empty-state')).toContainText('没有可显示的内容')
+  await expect(page.getByTestId('empty-state')).toContainText('没有任务')
 })
 
 test('tab with a selection indents without deleting the text', async ({ page }) => {

@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem};
@@ -146,6 +146,12 @@ fn set_acrylic(window: tauri::WebviewWindow, enabled: bool) -> Result<(), String
 
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WidgetPosition {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EditorBounds {
     x: i32,
     y: i32,
@@ -167,6 +173,15 @@ struct OpenFile {
 
 const FIRST_RUN_MARKDOWN: &str = "# 今日待办\n\n- [ ] 写周报\n  - [ ] 收集数据\n- [ ] 买牛奶\n- [ ] 看文档\n- [ ] 整理桌面\n";
 
+#[derive(Clone)]
+struct DraftState {
+    path: PathBuf,
+    text: String,
+    base_hash: String,
+    meta: sotto_core::bytes::ByteMeta,
+    missing: bool,
+}
+
 struct AppState {
     current: Mutex<Option<OpenFile>>,
     settings_path: PathBuf,
@@ -175,10 +190,15 @@ struct AppState {
     watcher: Mutex<Option<RecommendedWatcher>>,
     watched_path: Mutex<Option<PathBuf>>,
     last_hash: Arc<Mutex<String>>,
+    /// 编辑窗口草稿镜像；WM_QUERYENDSESSION 时同步落盘。
+    draft: Mutex<Option<DraftState>>,
     /// 编辑窗口最近一次可见的物理 bounds，用于移动/缩放后的防抖落盘。
     editor_bounds: Mutex<Option<EditorBounds>>,
     editor_bounds_gen: Arc<AtomicU64>,
     editor_bounds_flushing: Arc<AtomicBool>,
+    widget_position: Mutex<Option<WidgetPosition>>,
+    widget_position_gen: Arc<AtomicU64>,
+    widget_position_flushing: Arc<AtomicBool>,
     tray: Mutex<Option<tauri::tray::TrayIcon>>,
 }
 
@@ -208,9 +228,13 @@ impl AppState {
             watcher: Mutex::new(None),
             watched_path: Mutex::new(None),
             last_hash: Arc::new(Mutex::new(String::new())),
+            draft: Mutex::new(None),
             editor_bounds: Mutex::new(None),
             editor_bounds_gen: Arc::new(AtomicU64::new(0)),
             editor_bounds_flushing: Arc::new(AtomicBool::new(false)),
+            widget_position: Mutex::new(None),
+            widget_position_gen: Arc::new(AtomicU64::new(0)),
+            widget_position_flushing: Arc::new(AtomicBool::new(false)),
             tray: Mutex::new(None),
         })
     }
@@ -511,9 +535,15 @@ fn save_settings(
 ) -> Result<(), String> {
     // 编辑窗口 bounds 由 Rust 跟踪；前端拿到的快照可能晚一拍，不能让旧值覆盖新值。
     if let serde_json::Value::Object(ref mut map) = settings {
+        let disk = read_settings(&state.settings_path);
+        // windowPosition 由 Rust 在移动后写入；前端快照可能晚一拍，不能覆盖它。
+        if let Some(existing) = disk.get("windowPosition") {
+            if !existing.is_null() {
+                map.insert("windowPosition".into(), existing.clone());
+            }
+        }
         let missing = map.get("editorWindow").map_or(true, |value| value.is_null());
         if missing {
-            let disk = read_settings(&state.settings_path);
             if let Some(existing) = disk.get("editorWindow") {
                 if !existing.is_null() {
                     map.insert("editorWindow".into(), existing.clone());
@@ -524,6 +554,34 @@ fn save_settings(
     let json = serde_json::to_vec_pretty(&settings).map_err(|err| err.to_string())?;
     sotto_core::atomic::write_atomic(&state.settings_path, &json)?;
     let _ = app.emit("file-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn sync_draft(
+    state: tauri::State<'_, AppState>,
+    text: String,
+    base_disk_hash: String,
+) -> Result<(), String> {
+    let file = state
+        .current
+        .lock()
+        .map_err(|_| "文件状态锁失效".to_string())?
+        .clone()
+        .ok_or_else(|| "没有打开的文件".to_string())?;
+    *state.draft.lock().map_err(|_| "草稿锁失效".to_string())? = Some(DraftState {
+        path: file.path,
+        text,
+        base_hash: base_disk_hash,
+        meta: file.meta,
+        missing: file.missing,
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn clear_draft(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    *state.draft.lock().map_err(|_| "草稿锁失效".to_string())? = None;
     Ok(())
 }
 
@@ -871,6 +929,260 @@ fn reconcile_autostart(app: &tauri::AppHandle) {
     }
 }
 
+fn flush_session_draft(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let draft = state
+        .draft
+        .lock()
+        .map_err(|_| "草稿锁失效".to_string())?
+        .take();
+    let Some(draft) = draft else {
+        return Ok(());
+    };
+    if draft.missing || !draft.path.exists() {
+        return Err("文件不存在，会话结束草稿未写入原路径".into());
+    }
+    let disk_bytes = fs::read(&draft.path).map_err(|err| format!("会话结束读取磁盘失败: {err}"))?;
+    let disk_hash = sotto_core::bytes::text_hash(&disk_bytes);
+    if disk_hash != draft.base_hash {
+        return Err("会话结束发现磁盘冲突，草稿未覆盖".into());
+    }
+    let encoded = sotto_core::bytes::encode_existing(&draft.text, &draft.meta)?;
+    if let Err(err) = sotto_core::backup::create_backup(
+        &state.backups_dir,
+        &draft.path,
+        &disk_bytes,
+        &draft.meta,
+        sotto_core::backup::BackupReason::EditorClose,
+        now_ms(),
+    ) {
+        eprintln!("sotto session backup failed: {err}");
+    }
+    sotto_core::atomic::write_atomic(&draft.path, &encoded)?;
+    let decoded = sotto_core::bytes::decode(&encoded)?;
+    let next = OpenFile {
+        path: draft.path.clone(),
+        text: draft.text,
+        meta: decoded.meta.clone(),
+        read_only_reason: None,
+        missing: false,
+        read_error: None,
+    };
+    *state.current.lock().map_err(|_| "文件状态锁失效".to_string())? = Some(next);
+    set_last_hash(&state, &decoded.meta.hash);
+    Ok(())
+}
+
+#[cfg(windows)]
+static SESSION_APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+#[cfg(windows)]
+static SESSION_ORIGINAL_WNDPROC: OnceLock<isize> = OnceLock::new();
+
+#[cfg(windows)]
+unsafe extern "system" fn session_wndproc(
+    hwnd: isize,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    const WM_QUERYENDSESSION: u32 = 0x0011;
+    if msg == WM_QUERYENDSESSION {
+        if let Some(app) = SESSION_APP.get() {
+            if let Err(err) = flush_session_draft(app) {
+                eprintln!("sotto WM_QUERYENDSESSION flush failed: {err}");
+            }
+        }
+    }
+    let original = SESSION_ORIGINAL_WNDPROC.get().copied().unwrap_or(0);
+    if original == 0 {
+        return 0;
+    }
+    unsafe extern "system" {
+        fn CallWindowProcW(
+            previous: isize,
+            hwnd: isize,
+            msg: u32,
+            wparam: usize,
+            lparam: isize,
+        ) -> isize;
+    }
+    CallWindowProcW(original, hwnd, msg, wparam, lparam)
+}
+
+#[cfg(windows)]
+fn install_session_hook(
+    app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
+) -> Result<(), String> {
+    const GWLP_WNDPROC: i32 = -4;
+    unsafe extern "system" {
+        fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
+    }
+    let hwnd = window.hwnd().map_err(|err| err.to_string())?.0 as isize;
+    let _ = SESSION_APP.set(app.clone());
+    let previous = unsafe {
+        SetWindowLongPtrW(
+            hwnd,
+            GWLP_WNDPROC,
+            session_wndproc as unsafe extern "system" fn(isize, u32, usize, isize) -> isize as isize,
+        )
+    };
+    if previous == 0 {
+        return Err("安装 WM_QUERYENDSESSION 窗口过程失败".into());
+    }
+    let _ = SESSION_ORIGINAL_WNDPROC.set(previous);
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn install_session_hook(
+    _app: &tauri::AppHandle,
+    _window: &tauri::WebviewWindow,
+) -> Result<(), String> {
+    Ok(())
+}
+
+fn clamp_widget_position(
+    area_pos: (i32, i32),
+    area_size: (u32, u32),
+    window_size: (u32, u32),
+    position: (i32, i32),
+    margin: i32,
+) -> (i32, i32) {
+    let max_x = area_pos.0 + area_size.0 as i32 - window_size.0 as i32 - margin;
+    let max_y = area_pos.1 + area_size.1 as i32 - window_size.1 as i32 - margin;
+    (
+        position.0.clamp(area_pos.0 + margin, max_x.max(area_pos.0 + margin)),
+        position.1.clamp(area_pos.1 + margin, max_y.max(area_pos.1 + margin)),
+    )
+}
+
+fn written_widget_position(
+    state: &AppState,
+    position: WidgetPosition,
+    monitor_name: Option<String>,
+) -> Result<(), String> {
+    let mut map = read_settings_map(&state.settings_path);
+    let mut value = serde_json::Map::new();
+    value.insert("x".into(), serde_json::json!(position.x));
+    value.insert("y".into(), serde_json::json!(position.y));
+    if let Some(name) = monitor_name {
+        value.insert("monitorDevicePath".into(), serde_json::json!(name));
+    }
+    map.insert("windowPosition".into(), serde_json::Value::Object(value));
+    write_settings_map(&state.settings_path, map)
+}
+
+fn widget_position_now(app: &tauri::AppHandle) -> Option<WidgetPosition> {
+    app.get_webview_window("main")
+        .and_then(|window| window.outer_position().ok())
+        .map(|position| WidgetPosition {
+            x: position.x,
+            y: position.y,
+        })
+}
+
+/// 移动/缩放后 900ms 落盘，避免拖动期间每个事件都写 settings.json。
+fn queue_widget_position(app: &tauri::AppHandle) {
+    let Some(position) = widget_position_now(app) else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    if let Ok(mut guard) = state.widget_position.lock() {
+        if *guard == Some(position) {
+            return;
+        }
+        *guard = Some(position);
+    }
+    state.widget_position_gen.fetch_add(1, Ordering::SeqCst);
+    if state.widget_position_flushing.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app_handle = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(450));
+        let state = app_handle.state::<AppState>();
+        let seen = state.widget_position_gen.load(Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(450));
+        if state.widget_position_gen.load(Ordering::SeqCst) != seen {
+            continue;
+        }
+        let position = state.widget_position.lock().ok().and_then(|guard| *guard);
+        if let Some(position) = position {
+            let monitor_name = app_handle
+                .get_webview_window("main")
+                .and_then(|window| window.current_monitor().ok().flatten())
+                .and_then(|monitor| monitor.name().cloned());
+            if let Err(err) = written_widget_position(&state, position, monitor_name) {
+                eprintln!("sotto widget position save failed: {err}");
+            }
+        }
+        state.widget_position_flushing.store(false, Ordering::SeqCst);
+        break;
+    });
+}
+
+fn flush_widget_position(app: &tauri::AppHandle) {
+    let Some(position) = widget_position_now(app) else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    let monitor_name = app
+        .get_webview_window("main")
+        .and_then(|window| window.current_monitor().ok().flatten())
+        .and_then(|monitor| monitor.name().cloned());
+    if let Err(err) = written_widget_position(&state, position, monitor_name) {
+        eprintln!("sotto widget position flush failed: {err}");
+    }
+}
+
+fn restore_widget_position(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    let state = app.state::<AppState>();
+    let map = read_settings_map(&state.settings_path);
+    let Some(value) = map.get("windowPosition").and_then(|value| value.as_object()) else {
+        return Ok(());
+    };
+    let Some(x) = value.get("x").and_then(|value| value.as_i64()) else {
+        return Ok(());
+    };
+    let Some(y) = value.get("y").and_then(|value| value.as_i64()) else {
+        return Ok(());
+    };
+    let preferred = value
+        .get("monitorDevicePath")
+        .and_then(|value| value.as_str());
+    let wanted = (x as i32, y as i32);
+    let monitors = window.available_monitors()?;
+    let monitor = preferred
+        .and_then(|name| monitors.iter().find(|monitor| monitor.name().map(String::as_str) == Some(name)))
+        .or_else(|| {
+            monitors.iter().find(|monitor| {
+                let area = monitor.work_area();
+                wanted.0 >= area.position.x
+                    && wanted.0 < area.position.x + area.size.width as i32
+                    && wanted.1 >= area.position.y
+                    && wanted.1 < area.position.y + area.size.height as i32
+            })
+        })
+        .or_else(|| monitors.iter().find(|monitor| monitor.name().is_none()))
+        .or_else(|| monitors.first());
+    let Some(monitor) = monitor else {
+        return Ok(());
+    };
+    let area = monitor.work_area();
+    let size = window.outer_size()?;
+    let margin = (12.0 * window.scale_factor()?).round() as i32;
+    let (x, y) = clamp_widget_position(
+        (area.position.x, area.position.y),
+        (area.size.width, area.size.height),
+        (size.width, size.height),
+        wanted,
+        margin,
+    );
+    window.set_position(PhysicalPosition::new(x, y))?;
+    Ok(())
+}
+
 /// 把组件窗口夹回当前显示器工作区，留 12 逻辑像素边距。
 fn clamp_widget_to_work_area(window: &tauri::WebviewWindow) -> tauri::Result<()> {
     let Some(monitor) = window.current_monitor()?.or(window.primary_monitor()?) else {
@@ -1013,6 +1325,13 @@ mod geometry_tests {
     }
 
     #[test]
+    fn clamps_restored_widget_position() {
+        let (x, y) = clamp_widget_position((0, 0), (1920, 1040), (384, 220), (5000, -50), 12);
+        assert_eq!(x, 1920 - 384 - 12);
+        assert_eq!(y, 12);
+    }
+
+    #[test]
     fn expands_upward_when_bottom_would_overflow() {
         let (size, pos) = calculate_widget_bounds(
             (0, 0),
@@ -1068,8 +1387,10 @@ fn open_data_dir(state: tauri::State<'_, AppState>) -> Result<(), String> {
 
 /// 把组件移动到主屏工作区右下角，留 24 逻辑像素边距。
 #[tauri::command]
-fn reset_widget_position(window: tauri::WebviewWindow) -> Result<(), String> {
-    reset_widget_position_impl(&window).map_err(|err| err.to_string())
+fn reset_widget_position(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+    reset_widget_position_impl(&window).map_err(|err| err.to_string())?;
+    queue_widget_position(&app);
+    Ok(())
 }
 
 fn reset_widget_position_impl(window: &tauri::WebviewWindow) -> tauri::Result<()> {
@@ -1172,6 +1493,10 @@ fn request_exit(app: &tauri::AppHandle) {
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     flush_editor_bounds(&app);
+    flush_widget_position(&app);
+    if let Err(err) = flush_session_draft(&app) {
+        eprintln!("sotto quit draft flush failed: {err}");
+    }
     app.exit(0);
 }
 
@@ -1509,6 +1834,8 @@ pub fn run() {
             get_settings,
             save_settings,
             backup_current,
+            sync_draft,
+            clear_draft,
             pick_markdown_file,
             new_markdown_file,
             save_markdown_as,
@@ -1563,10 +1890,23 @@ pub fn run() {
             // 去掉系统边框，并去掉 tao 为无边框阴影预留的 13px 外扩区域；
             // 深色主题下卡片外不应出现任何可见矩形。
             clear_native_border(&window);
+            install_session_hook(app.handle(), &window)
+                .map_err(|err| Box::<dyn std::error::Error>::from(err))?;
 
             // 200% DPI、小屏或任务栏占位时，520 逻辑像素可能超出工作区；
             // 亚克力铺满窗口后必须保证整个面板可见。
+            restore_widget_position(app.handle(), &window)?;
             let _ = clamp_widget_to_work_area(&window);
+            let position_handle = app.handle().clone();
+            window.on_window_event(move |event| match event {
+                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                    queue_widget_position(&position_handle);
+                }
+                tauri::WindowEvent::CloseRequested { .. } => {
+                    flush_widget_position(&position_handle);
+                }
+                _ => {}
+            });
 
             // 亚克力由前端按设置主题调用 set_acrylic 开关，避免深色主题下出现半透明闪烁。
             let widget_visible = {

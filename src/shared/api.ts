@@ -75,6 +75,16 @@ export async function saveSettings(settings: Settings): Promise<void> {
   await invoke('save_settings', { settings })
 }
 
+export async function syncDraft(text: string, baseDiskHash: string): Promise<void> {
+  if (!isTauri()) return
+  await invoke('sync_draft', { text, baseDiskHash })
+}
+
+export async function clearDraft(): Promise<void> {
+  if (!isTauri()) return
+  await invoke('clear_draft')
+}
+
 export async function saveMarkdown(
   baseDiskHash: string,
   revision: number,
