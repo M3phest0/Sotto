@@ -25,6 +25,8 @@ pnpm tauri dev
 - `tools/p0/cdp.mjs`：通过 CDP 读写页面状态（`127.0.0.1:9222`）。
 - `tools/p0/input.ps1`：点击、双击、拖动、滚轮、Win+D、Alt+Tab、截图。
 - `tools/p0/appwindow.ps1`：普通前台窗口，用于覆盖与焦点测试。
+- `tools/p0/movewin1.ps1`：按标题移动指定窗口（已开 DPI 感知，坐标为物理像素）。
+- `tools/p0/closewin.ps1`：向指定窗口发送 `WM_CLOSE`，用于验证原生关闭拦截。
 
 ## 主题切换
 

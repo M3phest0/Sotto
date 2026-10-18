@@ -1,5 +1,10 @@
-import { describe, expect, it } from 'vitest'
-import { DEFAULT_SETTINGS, normalizeSettings } from '../src/shared/settings'
+import { describe, expect, it, vi } from 'vitest'
+import {
+  DEFAULT_SETTINGS,
+  SCHEMA_VERSION,
+  migrateSettings,
+  normalizeSettings,
+} from '../src/shared/settings'
 
 describe('normalizeSettings', () => {
   it('returns sane defaults', () => {
@@ -35,6 +40,53 @@ describe('normalizeSettings', () => {
   it('migrates an unasked invalid autostart to unset', () => {
     const settings = normalizeSettings({ autostart: 'nope', autostartAsked: false })
     expect(settings.autostart).toBe('unset')
+  })
+
+  it('migrates legacy v0 field names and stamps the schema version', () => {
+    const result = migrateSettings({
+      lastOpenedFile: 'Notes/todo.md',
+      position: { x: 12, y: 34 },
+      recent: ['a.md', 'a.md', 'b.md'],
+      theme: 'acrylic',
+    })
+    expect(result.fromVersion).toBe(0)
+    expect(result.migrated).toBe(true)
+    expect(result.settings.schemaVersion).toBe(SCHEMA_VERSION)
+    expect(result.settings.lastFile).toBe('Notes/todo.md')
+    expect(result.settings.windowPosition).toEqual({ x: 12, y: 34, monitorDevicePath: undefined })
+    expect(result.settings.recentFiles).toEqual(['a.md', 'b.md'])
+    expect(result.settings.theme).toBe('acrylic')
+  })
+
+  it('keeps current settings untouched and reports unknown fields', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const result = migrateSettings({
+        schemaVersion: SCHEMA_VERSION,
+        theme: 'dark',
+        fontSize: 16,
+        futureFlag: true,
+      })
+      expect(result.migrated).toBe(false)
+      expect(result.fromVersion).toBe(SCHEMA_VERSION)
+      expect(result.settings.fontSize).toBe(16)
+      expect(result.warnings.some((line) => line.includes('futureFlag'))).toBe(true)
+      expect(warn).toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('reads newer schemas without dropping valid fields', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const result = migrateSettings({ schemaVersion: SCHEMA_VERSION + 3, width: 420 })
+      expect(result.settings.width).toBe(420)
+      expect(result.settings.schemaVersion).toBe(SCHEMA_VERSION)
+      expect(result.warnings.some((line) => line.includes('更高版本'))).toBe(true)
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('drops invalid window objects and keeps valid ones', () => {

@@ -1,10 +1,13 @@
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{Emitter, Manager};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize};
 
 /// 桌面层布局：放在壁纸之上、普通窗口之下。
 /// Tauri 的 setAlwaysOnBottom 使用 HWND_BOTTOM，遇到动态壁纸（WorkerW）会被壁纸盖住，
@@ -96,6 +99,14 @@ fn set_acrylic(window: tauri::WebviewWindow, enabled: bool) -> Result<(), String
 }
 
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EditorBounds {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
 #[derive(Clone)]
 struct OpenFile {
     path: PathBuf,
@@ -112,6 +123,11 @@ struct AppState {
     watcher: Mutex<Option<RecommendedWatcher>>,
     watched_path: Mutex<Option<PathBuf>>,
     last_hash: Arc<Mutex<String>>,
+    /// 编辑窗口最近一次可见的物理 bounds，用于移动/缩放后的防抖落盘。
+    editor_bounds: Mutex<Option<EditorBounds>>,
+    editor_bounds_gen: Arc<AtomicU64>,
+    editor_bounds_flushing: Arc<AtomicBool>,
+    tray: Mutex<Option<tauri::tray::TrayIcon>>,
 }
 
 impl AppState {
@@ -129,6 +145,10 @@ impl AppState {
             watcher: Mutex::new(None),
             watched_path: Mutex::new(None),
             last_hash: Arc::new(Mutex::new(String::new())),
+            editor_bounds: Mutex::new(None),
+            editor_bounds_gen: Arc::new(AtomicU64::new(0)),
+            editor_bounds_flushing: Arc::new(AtomicBool::new(false)),
+            tray: Mutex::new(None),
         })
     }
 }
@@ -382,8 +402,20 @@ fn get_settings(state: tauri::State<'_, AppState>) -> serde_json::Value {
 fn save_settings(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-    settings: serde_json::Value,
+    mut settings: serde_json::Value,
 ) -> Result<(), String> {
+    // 编辑窗口 bounds 由 Rust 跟踪；前端拿到的快照可能晚一拍，不能让旧值覆盖新值。
+    if let serde_json::Value::Object(ref mut map) = settings {
+        let missing = map.get("editorWindow").map_or(true, |value| value.is_null());
+        if missing {
+            let disk = read_settings(&state.settings_path);
+            if let Some(existing) = disk.get("editorWindow") {
+                if !existing.is_null() {
+                    map.insert("editorWindow".into(), existing.clone());
+                }
+            }
+        }
+    }
     let json = serde_json::to_vec_pretty(&settings).map_err(|err| err.to_string())?;
     sotto_core::atomic::write_atomic(&state.settings_path, &json)?;
     let _ = app.emit("file-changed", ());
@@ -428,13 +460,556 @@ fn pick_markdown_file(
     Ok(Some(snapshot(&state, &file)))
 }
 
+fn read_settings_map(path: &Path) -> serde_json::Map<String, serde_json::Value> {
+    match read_settings(path) {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    }
+}
+
+fn write_settings_map(path: &Path, map: serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+    let value = serde_json::Value::Object(map);
+    let json = serde_json::to_vec_pretty(&value).map_err(|err| err.to_string())?;
+    sotto_core::atomic::write_atomic(path, &json)
+}
+
+fn settings_flag(map: &serde_json::Map<String, serde_json::Value>, key: &str, fallback: bool) -> bool {
+    map.get(key).and_then(|value| value.as_bool()).unwrap_or(fallback)
+}
+
+fn settings_text<'a>(
+    map: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    fallback: &'a str,
+) -> &'a str {
+    map.get(key).and_then(|value| value.as_str()).unwrap_or(fallback)
+}
+
+/// 读改写 settings.json，随后广播给组件/编辑窗口并刷新托盘勾选状态。
+fn patch_settings<F>(app: &tauri::AppHandle, patch: F)
+where
+    F: FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+{
+    let state = app.state::<AppState>();
+    let mut map = read_settings_map(&state.settings_path);
+    patch(&mut map);
+    if let Err(err) = write_settings_map(&state.settings_path, map) {
+        eprintln!("sotto settings patch failed: {err}");
+        return;
+    }
+    let _ = app.emit("file-changed", ());
+    sync_tray(app);
+}
+
+fn sync_tray(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let map = read_settings_map(&state.settings_path);
+    let Ok(menu) = build_tray_menu(app, &map) else {
+        return;
+    };
+    if let Ok(guard) = state.tray.lock() {
+        if let Some(tray) = guard.as_ref() {
+            let _ = tray.set_menu(Some(menu));
+        }
+    };
+}
+
+fn build_tray_menu(
+    app: &tauri::AppHandle,
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> tauri::Result<Menu<tauri::Wry>> {
+    let theme = settings_text(map, "theme", "dark");
+    let open = MenuItem::with_id(app, "open_editor", "打开编辑", true, None::<&str>)?;
+    let toggle = CheckMenuItem::with_id(
+        app,
+        "toggle_widget",
+        "显示组件",
+        true,
+        settings_flag(map, "widgetVisible", true),
+        None::<&str>,
+    )?;
+    let locked = CheckMenuItem::with_id(
+        app,
+        "locked",
+        "锁定位置",
+        true,
+        settings_flag(map, "locked", false),
+        None::<&str>,
+    )?;
+    let dark = CheckMenuItem::with_id(app, "theme_dark", "深色", true, theme != "acrylic", None::<&str>)?;
+    let acrylic = CheckMenuItem::with_id(
+        app,
+        "theme_acrylic",
+        "亚克力",
+        true,
+        theme == "acrylic",
+        None::<&str>,
+    )?;
+    let autostart = CheckMenuItem::with_id(
+        app,
+        "autostart",
+        "开机自启",
+        true,
+        settings_text(map, "autostart", "unset") == "enabled",
+        None::<&str>,
+    )?;
+    let exit = MenuItem::with_id(app, "exit", "退出", true, None::<&str>)?;
+    Menu::with_items(app, &[&open, &toggle, &locked, &dark, &acrylic, &autostart, &exit])
+}
+
+fn set_widget_visible(app: &tauri::AppHandle, visible: bool) {
+    if let Some(window) = app.get_webview_window("main") {
+        let result = if visible { window.show() } else { window.hide() };
+        if let Err(err) = result {
+            eprintln!("sotto widget visibility failed: {err}");
+            return;
+        }
+    }
+    patch_settings(app, |map| {
+        map.insert("widgetVisible".into(), serde_json::json!(visible));
+    });
+}
+
+fn toggle_widget_visible(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let map = read_settings_map(&state.settings_path);
+    set_widget_visible(app, !settings_flag(&map, "widgetVisible", true));
+}
+
+fn toggle_locked(app: &tauri::AppHandle) {
+    patch_settings(app, |map| {
+        let next = !settings_flag(map, "locked", false);
+        map.insert("locked".into(), serde_json::json!(next));
+    });
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AutostartStatus {
+    registered: bool,
+    disabled_by_system: bool,
+    command: Option<String>,
+}
+
+#[cfg(windows)]
+const AUTOSTART_VALUE_NAME: &str = "Sotto";
+#[cfg(windows)]
+const AUTOSTART_RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+#[cfg(windows)]
+const AUTOSTART_APPROVED_KEY: &str =
+    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+
+#[cfg(windows)]
+fn autostart_command() -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|err| format!("无法定位程序路径: {err}"))?;
+    Ok(format!("\"{}\" --autostart", exe.display()))
+}
+
+#[cfg(windows)]
+fn autostart_status() -> AutostartStatus {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let command = hkcu
+        .open_subkey_with_flags(AUTOSTART_RUN_KEY, KEY_READ)
+        .ok()
+        .and_then(|key| key.get_value::<String, _>(AUTOSTART_VALUE_NAME).ok());
+    let disabled_by_system = hkcu
+        .open_subkey_with_flags(AUTOSTART_APPROVED_KEY, KEY_READ)
+        .and_then(|key| key.get_raw_value(AUTOSTART_VALUE_NAME))
+        .map(|raw| {
+            raw.bytes
+                .first()
+                .map(|byte| *byte == 0x03 || *byte == 0x07)
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    AutostartStatus {
+        registered: command.is_some(),
+        disabled_by_system,
+        command,
+    }
+}
+
+#[cfg(not(windows))]
+fn autostart_status() -> AutostartStatus {
+    AutostartStatus {
+        registered: false,
+        disabled_by_system: false,
+        command: None,
+    }
+}
+
+fn set_autostart(enabled: bool) -> Result<AutostartStatus, String> {
+    #[cfg(windows)]
+    {
+        use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
+        use winreg::RegKey;
+
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let run = hkcu
+            .open_subkey_with_flags(AUTOSTART_RUN_KEY, KEY_READ | KEY_WRITE)
+            .map_err(|err| format!("打开自启注册表失败: {err}"))?;
+        if enabled {
+            let command = autostart_command()?;
+            run.set_value(AUTOSTART_VALUE_NAME, &command)
+                .map_err(|err| format!("写入自启注册表失败: {err}"))?;
+        } else {
+            match run.delete_value(AUTOSTART_VALUE_NAME) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(format!("删除自启注册表失败: {err}")),
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = enabled;
+    Ok(autostart_status())
+}
+
+fn reconcile_autostart(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let map = read_settings_map(&state.settings_path);
+    if settings_text(&map, "autostart", "unset") != "enabled" {
+        return;
+    }
+    if let Err(err) = set_autostart(true) {
+        eprintln!("sotto autostart reconcile failed: {err}");
+    }
+}
+
+fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let menu = {
+        let state = app.state::<AppState>();
+        let map = read_settings_map(&state.settings_path);
+        build_tray_menu(app, &map)?
+    };
+    let mut builder = TrayIconBuilder::with_id("sotto")
+        .tooltip("Sotto")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| tray_menu_event(app, event.id().as_ref()))
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                toggle_widget_visible(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon().cloned() {
+        builder = builder.icon(icon);
+    }
+    let tray = builder.build(app)?;
+    {
+        let state = app.state::<AppState>();
+        if let Ok(mut guard) = state.tray.lock() {
+            *guard = Some(tray);
+        };
+    }
+    Ok(())
+}
+
+fn tray_menu_event(app: &tauri::AppHandle, id: &str) {
+    match id {
+        "open_editor" => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = open_editor(app).await;
+            });
+        }
+        "toggle_widget" => toggle_widget_visible(app),
+        "locked" => toggle_locked(app),
+        "theme_dark" => patch_settings(app, |map| {
+            map.insert("theme".into(), serde_json::json!("dark"));
+        }),
+        "theme_acrylic" => patch_settings(app, |map| {
+            map.insert("theme".into(), serde_json::json!("acrylic"));
+        }),
+        "autostart" => {
+            let state = app.state::<AppState>();
+            let map = read_settings_map(&state.settings_path);
+            let next = settings_text(&map, "autostart", "unset") != "enabled";
+            match set_autostart(next) {
+                Ok(status) => {
+                    let value = if status.registered { "enabled" } else { "disabled" };
+                    patch_settings(app, |map| {
+                        map.insert("autostart".into(), serde_json::json!(value));
+                        map.insert("autostartAsked".into(), serde_json::json!(true));
+                    });
+                    if status.disabled_by_system {
+                        eprintln!("sotto autostart is disabled by Windows StartupApproved");
+                    }
+                }
+                Err(err) => eprintln!("sotto autostart toggle failed: {err}"),
+            }
+        }
+        "exit" => request_exit(app),
+        _ => {}
+    }
+}
+
+fn request_exit(app: &tauri::AppHandle) {
+    if let Some(editor) = app.get_webview_window("editor") {
+        let _ = editor.show();
+        let _ = editor.set_focus();
+        let _ = app.emit_to("editor", "exit-requested", ());
+    } else {
+        quit_app(app.clone());
+    }
+}
+
 #[tauri::command]
-fn open_editor(app: tauri::AppHandle) -> Result<(), String> {
+fn quit_app(app: tauri::AppHandle) {
+    flush_editor_bounds(&app);
+    app.exit(0);
+}
+
+#[tauri::command]
+fn get_autostart_status() -> AutostartStatus {
+    autostart_status()
+}
+
+#[tauri::command]
+fn apply_autostart(enabled: bool) -> Result<AutostartStatus, String> {
+    set_autostart(enabled)
+}
+
+fn saved_editor_bounds(state: &AppState) -> Option<(EditorBounds, Option<String>)> {
+    let value = read_settings(&state.settings_path);
+    let editor = value.get("editorWindow")?;
+    if editor.is_null() {
+        return None;
+    }
+    let x = editor.get("x")?.as_i64()? as i32;
+    let y = editor.get("y")?.as_i64()? as i32;
+    let width = editor.get("width")?.as_u64()? as u32;
+    let height = editor.get("height")?.as_u64()? as u32;
+    if width < 200 || height < 150 {
+        return None;
+    }
+    Some((
+        EditorBounds {
+            x,
+            y,
+            width,
+            height,
+        },
+        editor
+            .get("monitorDevicePath")
+            .and_then(|item| item.as_str())
+            .map(str::to_owned),
+    ))
+}
+
+/// 把保存的 bounds 夹回当前显示器工作区；显示器被拔掉时回退到主屏。
+fn clamp_editor_bounds(
+    app: &tauri::AppHandle,
+    mut bounds: EditorBounds,
+    preferred_monitor: Option<&str>,
+) -> Option<EditorBounds> {
+    let monitors = app.available_monitors().ok()?;
+    if monitors.is_empty() {
+        return None;
+    }
+    let area = |left: i64, top: i64, right: i64, bottom: i64| -> i64 {
+        let x = (right - left).max(0);
+        let y = (bottom - top).max(0);
+        x * y
+    };
+    let window_rect = |b: &EditorBounds| {
+        (
+            b.x as i64,
+            b.y as i64,
+            b.x as i64 + b.width as i64,
+            b.y as i64 + b.height as i64,
+        )
+    };
+
+    let mut best_index = 0usize;
+    let mut best_area = i64::MIN;
+    for (index, monitor) in monitors.iter().enumerate() {
+        let (left, top, right, bottom) = window_rect(&bounds);
+        let wa = monitor.work_area();
+        let wa_right = wa.position.x as i64 + wa.size.width as i64;
+        let wa_bottom = wa.position.y as i64 + wa.size.height as i64;
+        // 用交集面积作为主排序；指定显示器优先。
+        let mut score = area(
+            left.max(wa.position.x as i64),
+            top.max(wa.position.y as i64),
+            right.min(wa_right),
+            bottom.min(wa_bottom),
+        );
+        let preferred = preferred_monitor
+            .map(|name| monitor.name().map(|value| value == name).unwrap_or(false))
+            .unwrap_or(false);
+        if preferred {
+            score += 1_000_000_000_000;
+        }
+        if score > best_area {
+            best_area = score;
+            best_index = index;
+        }
+    }
+
+    let monitor = &monitors[best_index];
+    let wa = monitor.work_area();
+    let mx = wa.position.x;
+    let my = wa.position.y;
+    let mw = wa.size.width as i32;
+    let mh = wa.size.height as i32;
+    if mw <= 0 || mh <= 0 {
+        return None;
+    }
+
+    bounds.width = bounds.width.min(mw as u32).max(760.min(mw as u32));
+    bounds.height = bounds.height.min(mh as u32).max(520.min(mh as u32));
+
+    // 至少保留 120px 可见，避免窗口完全落在屏幕外。
+    let min_visible_x = 120i32.min(bounds.width as i32);
+    let min_visible_y = 60i32.min(bounds.height as i32);
+    bounds.x = bounds.x.clamp(
+        mx - bounds.width as i32 + min_visible_x,
+        mx + mw - min_visible_x,
+    );
+    bounds.y = bounds.y.clamp(my, my + mh - min_visible_y);
+    Some(bounds)
+}
+
+fn write_editor_bounds(
+    state: &AppState,
+    bounds: EditorBounds,
+    monitor_name: Option<String>,
+) -> Result<(), String> {
+    let mut map = read_settings_map(&state.settings_path);
+    let mut editor = serde_json::Map::new();
+    editor.insert("x".into(), serde_json::json!(bounds.x));
+    editor.insert("y".into(), serde_json::json!(bounds.y));
+    editor.insert("width".into(), serde_json::json!(bounds.width));
+    editor.insert("height".into(), serde_json::json!(bounds.height));
+    if let Some(name) = monitor_name {
+        editor.insert("monitorDevicePath".into(), serde_json::json!(name));
+    }
+    map.insert("editorWindow".into(), serde_json::Value::Object(editor));
+    write_settings_map(&state.settings_path, map)
+}
+
+fn editor_bounds_now(app: &tauri::AppHandle) -> Option<(EditorBounds, Option<String>)> {
+    let window = app.get_webview_window("editor")?;
+    if window.is_maximized().unwrap_or(false) || window.is_minimized().unwrap_or(false) {
+        return None;
+    }
+    let position = window.outer_position().ok()?;
+    let size = window.inner_size().ok()?;
+    if size.width < 200 || size.height < 150 {
+        return None;
+    }
+    let monitor_name = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .and_then(|monitor| monitor.name().cloned());
+    Some((
+        EditorBounds {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+        },
+        monitor_name,
+    ))
+}
+
+fn flush_editor_bounds(app: &tauri::AppHandle) {
+    let Some((bounds, monitor_name)) = editor_bounds_now(app) else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    if let Ok(mut guard) = state.editor_bounds.lock() {
+        *guard = Some(bounds);
+    }
+    if let Err(err) = write_editor_bounds(&state, bounds, monitor_name) {
+        eprintln!("sotto editor bounds flush failed: {err}");
+    }
+}
+
+/// 移动/缩放期间只更新内存，停止 900ms 后落盘，避免每个事件都写 settings.json。
+fn queue_editor_bounds(app: &tauri::AppHandle, label: &str) {
+    let Some(window) = app.get_webview_window(label) else {
+        return;
+    };
+    if window.is_maximized().unwrap_or(false) || window.is_minimized().unwrap_or(false) {
+        return;
+    }
+    let Ok(position) = window.outer_position() else {
+        return;
+    };
+    let Ok(size) = window.inner_size() else {
+        return;
+    };
+    if size.width < 200 || size.height < 150 {
+        return;
+    }
+    let bounds = EditorBounds {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+    };
+
+    let state = app.state::<AppState>();
+    if let Ok(mut guard) = state.editor_bounds.lock() {
+        if *guard == Some(bounds) {
+            return;
+        }
+        *guard = Some(bounds);
+    }
+    state.editor_bounds_gen.fetch_add(1, Ordering::SeqCst);
+    if state.editor_bounds_flushing.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let app_handle = app.clone();
+    let label = label.to_string();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(450));
+            let state = app_handle.state::<AppState>();
+            let seen = state.editor_bounds_gen.load(Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(450));
+            if state.editor_bounds_gen.load(Ordering::SeqCst) != seen {
+                continue;
+            }
+            let bounds = state.editor_bounds.lock().ok().and_then(|guard| *guard);
+            if let Some(bounds) = bounds {
+                let monitor_name = app_handle
+                    .get_webview_window(&label)
+                    .and_then(|window| window.current_monitor().ok().flatten())
+                    .and_then(|monitor| monitor.name().cloned());
+                if let Err(err) = write_editor_bounds(&state, bounds, monitor_name) {
+                    eprintln!("sotto editor bounds save failed: {err}");
+                }
+            }
+            state.editor_bounds_flushing.store(false, Ordering::SeqCst);
+            break;
+        }
+    });
+}
+
+#[tauri::command]
+async fn open_editor(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("editor") {
         window.show().map_err(|err| err.to_string())?;
         window.set_focus().map_err(|err| err.to_string())?;
         return Ok(());
     }
+    let saved = {
+        let state = app.state::<AppState>();
+        saved_editor_bounds(&state)
+    };
     let window = tauri::WebviewWindowBuilder::new(
         &app,
         "editor",
@@ -443,8 +1018,35 @@ fn open_editor(app: tauri::AppHandle) -> Result<(), String> {
     .title("Sotto · 编辑")
     .inner_size(980.0, 680.0)
     .min_inner_size(720.0, 480.0)
+    .visible(false)
     .build()
     .map_err(|err| err.to_string())?;
+
+    if let Some((bounds, preferred)) = saved {
+        if let Some(bounds) = clamp_editor_bounds(&app, bounds, preferred.as_deref()) {
+            // set_size 作用于内尺寸，editorWindow 也按内尺寸保存。
+            window
+                .set_size(PhysicalSize::new(bounds.width, bounds.height))
+                .map_err(|err| err.to_string())?;
+            window
+                .set_position(PhysicalPosition::new(bounds.x, bounds.y))
+                .map_err(|err| err.to_string())?;
+        }
+    }
+
+    let label = window.label().to_string();
+    let handle = app.clone();
+    window.on_window_event(move |event| match event {
+        tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+            queue_editor_bounds(&handle, &label);
+        }
+        tauri::WindowEvent::CloseRequested { .. } => {
+            flush_editor_bounds(&handle);
+        }
+        _ => {}
+    });
+
+    window.show().map_err(|err| err.to_string())?;
     window.set_focus().map_err(|err| err.to_string())?;
     Ok(())
 }
@@ -452,6 +1054,27 @@ fn open_editor(app: tauri::AppHandle) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 单实例插件必须尽早注册；重复启动时唤出编辑窗口。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("editor") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            } else {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = open_editor(app).await;
+                });
+            }
+        }))
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        toggle_locked(app);
+                    }
+                })
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             set_acrylic,
             set_desktop_layer,
@@ -463,11 +1086,35 @@ pub fn run() {
             backup_current,
             pick_markdown_file,
             open_editor,
+            quit_app,
+            get_autostart_status,
+            apply_autostart,
         ])
         .setup(|app| {
             let state = AppState::new(app.handle())
                 .map_err(|err| Box::<dyn std::error::Error>::from(err))?;
             app.manage(state);
+            create_tray(app.handle())?;
+            reconcile_autostart(app.handle());
+            {
+                use tauri_plugin_global_shortcut::GlobalShortcutExt;
+                // 快捷键被其他程序占用时不应该阻止应用启动。
+                if let Err(err) = app.global_shortcut().register("ctrl+alt+l") {
+                    eprintln!("sotto shortcut register failed: {err}");
+                }
+            }
+            let autostart_launch = std::env::args().any(|arg| arg == "--autostart");
+            if autostart_launch {
+                // 登录自启永不弹首启询问：在组件加载前先标记已询问。
+                let state = app.state::<AppState>();
+                let mut map = read_settings_map(&state.settings_path);
+                if map.get("autostartAsked").and_then(|v| v.as_bool()) != Some(true) {
+                    map.insert("autostartAsked".into(), serde_json::json!(true));
+                    if let Err(err) = write_settings_map(&state.settings_path, map) {
+                        eprintln!("sotto autostart launch flag failed: {err}");
+                    }
+                }
+            }
             let window = tauri::WebviewWindowBuilder::new(
                 app,
                 "main",
@@ -483,7 +1130,23 @@ pub fn run() {
             .build()?;
 
             // 亚克力由前端按设置主题调用 set_acrylic 开关，避免深色主题下出现半透明闪烁。
-            window.show()?;
+            let widget_visible = {
+                let state = app.state::<AppState>();
+                let map = read_settings_map(&state.settings_path);
+                settings_flag(&map, "widgetVisible", true)
+            };
+            if widget_visible {
+                if autostart_launch {
+                    // 登录自启延迟 2 秒显示，避免和桌面初始化抢焦点；手动启动立即显示。
+                    let window = window.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        let _ = window.show();
+                    });
+                } else {
+                    window.show()?;
+                }
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

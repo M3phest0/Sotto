@@ -472,6 +472,13 @@
   font: inherit;
 }
 
+.setting-note {
+  margin-top: -2px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #ffb27a;
+}
+
 .setting-field.checkbox-field {
   flex-direction: row;
   align-items: center;

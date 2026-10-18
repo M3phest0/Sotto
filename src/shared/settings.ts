@@ -81,8 +81,85 @@ function asRecentFiles(value: unknown): string[] {
   return out
 }
 
-export function normalizeSettings(input: unknown): Settings {
-  const raw = input && typeof input === 'object' ? (input as Record<string, unknown>) : {}
+const KNOWN_KEYS = new Set(Object.keys(DEFAULT_SETTINGS))
+
+type RawSettings = Record<string, unknown>
+
+/**
+ * v0 → v1：M1 的浏览器版本没有 schemaVersion，而且可能使用旧字段名。
+ * 迁移只做字段重命名和补默认值，范围校验仍然交给 normalizeSettings。
+ */
+function migrateV0(raw: RawSettings): RawSettings {
+  const next = { ...raw }
+  if (next.lastFile === undefined && typeof next.lastOpenedFile === 'string') {
+    next.lastFile = next.lastOpenedFile
+  }
+  if (next.windowPosition === undefined && next.position && typeof next.position === 'object') {
+    next.windowPosition = next.position
+  }
+  if (next.recentFiles === undefined && Array.isArray(next.recent)) {
+    next.recentFiles = next.recent
+  }
+  return next
+}
+
+const MIGRATIONS: Record<number, (raw: RawSettings) => RawSettings> = {
+  0: migrateV0,
+}
+
+export interface MigrationResult {
+  settings: Settings
+  migrated: boolean
+  fromVersion: number
+  warnings: string[]
+}
+
+export function migrateSettings(input: unknown): MigrationResult {
+  const warnings: string[] = []
+  let raw: RawSettings = input && typeof input === 'object' && !Array.isArray(input)
+    ? { ...(input as RawSettings) }
+    : {}
+
+  const declared = typeof raw.schemaVersion === 'number' && Number.isFinite(raw.schemaVersion)
+    ? Math.floor(raw.schemaVersion)
+    : 0
+  const fromVersion = Math.max(0, declared)
+
+  if (fromVersion > SCHEMA_VERSION) {
+    warnings.push(`设置来自更高版本（schemaVersion ${fromVersion}），按当前版本读取`)
+  }
+
+  let version = Math.min(fromVersion, SCHEMA_VERSION)
+  const startVersion = version
+  while (version < SCHEMA_VERSION) {
+    const migrate = MIGRATIONS[version]
+    if (!migrate) {
+      warnings.push(`缺少 schemaVersion ${version} 的迁移，剩余字段按默认值处理`)
+      break
+    }
+    raw = migrate(raw)
+    version += 1
+  }
+
+  for (const key of Object.keys(raw)) {
+    if (!KNOWN_KEYS.has(key) && key !== 'lastOpenedFile' && key !== 'position' && key !== 'recent') {
+      warnings.push(`忽略未知设置字段：${key}`)
+    }
+  }
+
+  if (warnings.length > 0) {
+    console.warn('[sotto] settings migration:', warnings.join('; '))
+  }
+
+  return {
+    settings: normalizeRaw(raw),
+    migrated: version !== startVersion,
+    fromVersion,
+    warnings,
+  }
+}
+
+function normalizeRaw(raw: RawSettings): Settings {
   const autostartAsked = asBool(raw.autostartAsked, false)
   const compact = clampInt(raw.compact, DEFAULT_SETTINGS.compact, 3, 10)
   const expanded = Math.max(compact, clampInt(raw.expanded, DEFAULT_SETTINGS.expanded, 5, 30))
@@ -104,6 +181,10 @@ export function normalizeSettings(input: unknown): Settings {
     widgetVisible: asBool(raw.widgetVisible, DEFAULT_SETTINGS.widgetVisible),
     keepOnShowDesktop: asBool(raw.keepOnShowDesktop, DEFAULT_SETTINGS.keepOnShowDesktop),
   }
+}
+
+export function normalizeSettings(input: unknown): Settings {
+  return migrateSettings(input).settings
 }
 
 export function mergeSettings(current: Settings, patch: Partial<Settings>): Settings {

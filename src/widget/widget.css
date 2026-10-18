@@ -281,6 +281,13 @@
   color: rgba(214, 223, 244, 0.52);
 }
 
+.first-run-error {
+  margin: -6px 0 12px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #ff9b9b;
+}
+
 .first-run-actions {
   display: flex;
   gap: 8px;

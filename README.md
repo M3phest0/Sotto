@@ -1,6 +1,6 @@
 # Sotto · Win11 桌面便签组件
 
-当前进度：M1/P0 完成；M2 核心完成，剩余非阻塞收尾。
+当前进度：M1/P0 完成；M2 完成，进入 M3 前收尾。
 
 设计方案：[Sotto.md](Sotto.md)  
 P0 报告：[docs/P0-REPORT.md](docs/P0-REPORT.md)
@@ -64,15 +64,20 @@ Windows P0 的隔离 Rust 环境见 [docs/DEV-ENV.md](docs/DEV-ENV.md)。
 - 写前/5 分钟/关闭编辑窗口备份、41 份裁剪、每源 200MB、全局 1GB。
 - 原生文件选择器、设置持久化、只读编码提示。
 - 编辑窗口真实 IPC 保存；浏览器仍走 mock。
+- 设置 schema 迁移（v0 → v1，含 `todo-list:*` 旧键迁移与未知字段告警）。
+- 编辑窗口 bounds 保存/恢复（900ms 防抖、跨屏 clamp、边框修正）。
+- 原生关闭拦截（标题栏 X / Alt+F4）、未保存确认、托盘退出走同一流程。
+- 托盘菜单（打开编辑/显示组件/锁定/主题/自启/退出）、左键切换组件、Ctrl+Alt+L 锁定。
+- 开机自启（HKCU Run + StartupApproved 状态识别、登录启动延迟、单实例）。
 
 待收尾：
 
-- 设置 schema 迁移与编辑窗口 bounds 恢复。
-- 原生关闭按钮拦截、托盘/热键/自启。
-- Windows CI 最终验证。
+- Windows CI 最终验证（工作流已就绪，本地已按同步骤跑通，待推送触发）。
+
+运行验证记录见 [docs/M2-REPORT.md](docs/M2-REPORT.md)。
 
 ## 限制
 
-- 编辑窗口已接真实 IPC；设置 schema 迁移、编辑窗口 bounds 和原生关闭拦截仍在 M2 收尾。
+- 编辑窗口已接真实 IPC。
 - Playwright 只验证 Vite + mock IPC，不驱动 WebView2。
 - 未签名，Windows SmartScreen 可能提示。

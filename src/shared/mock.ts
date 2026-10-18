@@ -1,11 +1,15 @@
 import type { Snapshot, Settings, TaskDocument } from './types'
-import { DEFAULT_SETTINGS, normalizeSettings } from './settings'
+import { DEFAULT_SETTINGS, migrateSettings, normalizeSettings } from './settings'
 import { parseTaskDocument } from './taskParser'
 
 export const DOCUMENT_KEY = 'sotto:document'
 export const SETTINGS_KEY = 'sotto:settings'
 export const ASKED_KEY = 'sotto:autostart-asked'
 export const CHANNEL_NAME = 'sotto:sync'
+
+// M1 使用的键名；读取时迁移到 sotto:*，写回后删除旧键。
+export const LEGACY_SETTINGS_KEY = 'todo-list:settings'
+export const LEGACY_ASKED_KEY = 'todo-list:autostart-asked'
 
 export const SAMPLE_MARKDOWN = `# 今日待办
 
@@ -55,19 +59,40 @@ export function saveDocumentText(text: string): void {
 
 export function loadSettings(): Settings {
   const storage = safeLocalStorage()
-  const raw = storage?.getItem(SETTINGS_KEY)
+  const legacyAsked = storage?.getItem(LEGACY_ASKED_KEY) === '1'
+  const asked = storage?.getItem(ASKED_KEY) === '1' || legacyAsked
+  let raw = storage?.getItem(SETTINGS_KEY)
+  let fromLegacy = false
   if (!raw) {
-    const settings: Settings = {
+    raw = storage?.getItem(LEGACY_SETTINGS_KEY) ?? null
+    fromLegacy = raw !== null
+  }
+  if (!raw) {
+    return {
       ...DEFAULT_SETTINGS,
-      autostartAsked: storage?.getItem(ASKED_KEY) === '1',
+      autostartAsked: asked,
     }
-    return settings
   }
+  let parsed: unknown
   try {
-    return normalizeSettings(JSON.parse(raw))
+    parsed = JSON.parse(raw)
   } catch {
-    return { ...DEFAULT_SETTINGS }
+    return { ...DEFAULT_SETTINGS, autostartAsked: asked }
   }
+  const result = migrateSettings(parsed)
+  const settings = result.settings
+  if (asked && !settings.autostartAsked) {
+    settings.autostartAsked = true
+  }
+  if (fromLegacy || result.migrated) {
+    storage?.setItem(SETTINGS_KEY, JSON.stringify(settings))
+    if (fromLegacy) storage?.removeItem(LEGACY_SETTINGS_KEY)
+  }
+  if (asked) {
+    storage?.setItem(ASKED_KEY, '1')
+    if (legacyAsked) storage?.removeItem(LEGACY_ASKED_KEY)
+  }
+  return settings
 }
 
 export function saveSettings(settings: Settings): void {

@@ -17,14 +17,19 @@ import {
   saveDocumentText,
 } from '../shared/mock'
 import {
+  applyAutostart,
   backupCurrent,
+  getAutostartStatus,
   loadSnapshot as loadBackendSnapshot,
   pickMarkdownFile,
+  quitApp,
   saveMarkdown,
   saveSettings,
   subscribeToChanges,
 } from '../shared/api'
+import { listen } from '@tauri-apps/api/event'
 import { isTauri } from '../shared/desktop'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { DEFAULT_SETTINGS, normalizeSettings } from '../shared/settings'
 import './editor.css'
 
@@ -69,7 +74,9 @@ export function EditorApp() {
   const [notice, setNotice] = useState<string | null>(null)
   const [showCloseConfirm, setShowCloseConfirm] = useState(false)
   const [conflictHash, setConflictHash] = useState<string | null>(null)
+  const conflictHashRef = useRef<string | null>(null)
   const [readOnlyReason, setReadOnlyReason] = useState<string | null>(initial?.readOnlyReason ?? null)
+  const [autostartNote, setAutostartNote] = useState<string | null>(null)
   const [editorNonce, setEditorNonce] = useState(0)
   const revisionRef = useRef(0)
   const baseHashRef = useRef(initial?.meta?.hash ?? '')
@@ -78,6 +85,7 @@ export function EditorApp() {
   const blockedRef = useRef(false)
   const dirtyRef = useRef(false)
   const composingRef = useRef(false)
+  const exitAfterCloseRef = useRef(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -180,6 +188,10 @@ export function EditorApp() {
   }, [dirty])
 
   useEffect(() => {
+    conflictHashRef.current = conflictHash
+  }, [conflictHash])
+
+  useEffect(() => {
     if (!useBackend) return
     const unsubscribe = subscribeToChanges(() => {
       void (async () => {
@@ -212,6 +224,66 @@ export function EditorApp() {
     return () => window.clearInterval(timer)
   }, [useBackend])
 
+  // 标题栏 X / Alt+F4 也走同一套未保存确认；requestClose 只读 ref，无需重建监听。
+  useEffect(() => {
+    if (!useBackend) return
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void getCurrentWindow()
+      .onCloseRequested((event) => {
+        event.preventDefault()
+        requestClose()
+      })
+      .then((fn) => {
+        if (disposed) fn()
+        else unlisten = fn
+      })
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [useBackend])
+
+  // 托盘“退出”：有未保存修改时先走确认，确认后由 finishClose 退出整个应用。
+  useEffect(() => {
+    if (!useBackend) return
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void listen('exit-requested', () => {
+      exitAfterCloseRef.current = true
+      requestClose()
+    }).then((fn) => {
+      if (disposed) fn()
+      else unlisten = fn
+    })
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [useBackend])
+
+  useEffect(() => {
+    if (!useBackend) return
+    let active = true
+    void getAutostartStatus()
+      .then((status) => {
+        if (!active) return
+        if (status.disabledBySystem) {
+          setAutostartNote('Windows 已禁用该自启项，请到“启动应用”中手动启用')
+        } else if (settings.autostart === 'enabled' && !status.registered) {
+          setAutostartNote('自启项未注册，将在下次启动时重新写入')
+        } else {
+          setAutostartNote(null)
+        }
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+    }
+  }, [useBackend, settings.autostart])
+
   useEffect(() => {
     if (!dirty || composingRef.current || blockedRef.current || readOnlyReason) return
     const timer = window.setTimeout(() => {
@@ -226,15 +298,15 @@ export function EditorApp() {
     return () => window.clearTimeout(timer)
   }, [notice])
 
-  async function persistNow(): Promise<void> {
-    if (blockedRef.current) return
+  async function persistNow(): Promise<boolean> {
+    if (blockedRef.current) return false
     if (readOnlyReason) {
       setNotice(readOnlyReason)
-      return
+      return false
     }
     if (savingRef.current) {
       pendingRef.current = true
-      return
+      return false
     }
     const content = textareaRef.current?.value ?? text
     const revisionAtSave = revisionRef.current
@@ -250,12 +322,12 @@ export function EditorApp() {
           setConflictHash(result.diskHash)
           setSaveState('error')
           setNotice(result.message ?? '磁盘文件已变化；未覆盖')
-          return
+          return false
         }
         if (result.status === 'error') {
           setSaveState('error')
           setNotice(result.message ?? '保存失败')
-          return
+          return false
         }
         baseHashRef.current = result.diskHash ?? ''
       }
@@ -268,9 +340,11 @@ export function EditorApp() {
         pendingRef.current = true
         setSaveState('saving')
       }
+      return true
     } catch (err) {
       setSaveState('error')
       setNotice(String(err))
+      return false
     } finally {
       savingRef.current = false
       if (pendingRef.current && revisionRef.current !== revisionAtSave) {
@@ -278,6 +352,74 @@ export function EditorApp() {
         void persistNow()
       }
     }
+  }
+
+  /** 等待在途保存和 pending 队列落定；超时返回 false。 */
+  function waitForSaveIdle(timeoutMs = 5000): Promise<boolean> {
+    const started = Date.now()
+    return new Promise((resolve) => {
+      const tick = () => {
+        if (!savingRef.current && !pendingRef.current) {
+          resolve(true)
+          return
+        }
+        if (Date.now() - started >= timeoutMs) {
+          resolve(false)
+          return
+        }
+        window.setTimeout(tick, 50)
+      }
+      tick()
+    })
+  }
+
+  async function finishClose(): Promise<void> {
+    setShowCloseConfirm(false)
+    if (useBackend) {
+      try {
+        await backupCurrent('editor-close')
+      } catch {
+        // 备份失败不阻塞关闭；下次启动仍可从未备份的磁盘内容读取。
+      }
+      if (exitAfterCloseRef.current) {
+        await quitApp()
+        return
+      }
+      await getCurrentWindow().destroy()
+      return
+    }
+    window.close()
+  }
+
+  function requestClose(): void {
+    if (savingRef.current) {
+      setNotice('保存中，请稍候')
+      return
+    }
+    if (dirtyRef.current || conflictHashRef.current) {
+      setShowCloseConfirm(true)
+      return
+    }
+    void finishClose()
+  }
+
+  async function closeAfterSave(): Promise<void> {
+    await persistNow()
+    const settled = await waitForSaveIdle()
+    if (!settled) {
+      setNotice('保存超时，请重试或选择放弃')
+      return
+    }
+    if (blockedRef.current || conflictHashRef.current) return
+    if (readOnlyReason) {
+      setNotice(readOnlyReason)
+      return
+    }
+    await finishClose()
+  }
+
+  function closeWithoutSave(): void {
+    void finishClose()
   }
 
   function saveNow(): void {
@@ -360,6 +502,35 @@ export function EditorApp() {
     void saveSettings(next)
   }
 
+  async function updateAutostart(value: Settings['autostart']): Promise<void> {
+    if (value === 'enabled') {
+      try {
+        const status = await applyAutostart(true)
+        if (!status.registered) {
+          setAutostartNote(
+            status.disabledBySystem
+              ? 'Windows 已禁用该自启项，请到“启动应用”中手动启用'
+              : '自启注册失败，未标记为启用',
+          )
+          updateSettings({ autostart: 'disabled' }, true)
+          return
+        }
+        setAutostartNote(null)
+        updateSettings({ autostart: 'enabled' }, true)
+      } catch (err) {
+        setAutostartNote(`自启注册失败：${String(err)}`)
+        updateSettings({ autostart: 'disabled' }, true)
+      }
+      return
+    }
+    try {
+      await applyAutostart(false)
+    } catch (err) {
+      setAutostartNote(`删除自启项失败：${String(err)}`)
+    }
+    updateSettings({ autostart: value }, true)
+  }
+
   function handleFile(event: ChangeEvent<HTMLInputElement>): void {
     if (useBackend) {
       event.currentTarget.value = ''
@@ -413,29 +584,6 @@ export function EditorApp() {
     baseHashRef.current = conflictHash
     setConflictHash(null)
     await persistNow()
-  }
-
-  function requestClose(): void {
-    if (dirty) {
-      setShowCloseConfirm(true)
-      return
-    }
-    if (useBackend) void backupCurrent('editor-close')
-    window.close()
-  }
-
-  async function closeAfterSave(): Promise<void> {
-    await persistNow()
-    if (blockedRef.current || saveState === 'error') return
-    if (useBackend) await backupCurrent('editor-close')
-    setShowCloseConfirm(false)
-    window.setTimeout(() => window.close(), 30)
-  }
-
-  function closeWithoutSave(): void {
-    if (useBackend) void backupCurrent('editor-close')
-    setShowCloseConfirm(false)
-    window.close()
   }
 
   const fullHtml = useMemo(
@@ -689,13 +837,14 @@ export function EditorApp() {
               <select
                 value={settings.autostart}
                 onChange={(event) =>
-                  updateSettings({ autostart: event.currentTarget.value as Settings['autostart'] }, true)
+                  void updateAutostart(event.currentTarget.value as Settings['autostart'])
                 }
               >
                 <option value="unset">未设置</option>
                 <option value="enabled">启用</option>
                 <option value="disabled">暂不启用</option>
               </select>
+              {autostartNote ? <span className="setting-note">{autostartNote}</span> : null}
             </label>
           </div>
 
@@ -741,17 +890,28 @@ export function EditorApp() {
         <div className="editor-modal-backdrop">
           <div className="editor-modal" role="dialog" aria-modal="true" aria-label="关闭编辑窗口">
             <div className="modal-title">还有未保存修改</div>
-            <p className="modal-copy">保存后关闭，或放弃本次修改。</p>
+            <p className="modal-copy">
+              {readOnlyReason ? '文件为只读，无法保存。可以放弃修改或取消。' : '保存后关闭，或放弃本次修改。'}
+            </p>
             <div className="modal-actions">
               <button className="danger-button" type="button" onClick={closeWithoutSave}>
-                放弃
+                {readOnlyReason ? '关闭' : '放弃'}
               </button>
-              <button className="editor-button" type="button" onClick={() => setShowCloseConfirm(false)}>
+              <button
+                className="editor-button"
+                type="button"
+                onClick={() => {
+                  exitAfterCloseRef.current = false
+                  setShowCloseConfirm(false)
+                }}
+              >
                 取消
               </button>
-              <button className="editor-button primary" type="button" onClick={closeAfterSave}>
-                保存并关闭
-              </button>
+              {readOnlyReason ? null : (
+                <button className="editor-button primary" type="button" onClick={() => void closeAfterSave()}>
+                  保存并关闭
+                </button>
+              )}
             </div>
           </div>
         </div>

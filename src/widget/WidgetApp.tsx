@@ -4,6 +4,7 @@ import { MarkdownInline } from '../shared/MarkdownInline'
 import { getProgress, getVisibleTasks } from '../shared/taskParser'
 import type { Snapshot } from '../shared/types'
 import {
+  applyAutostart,
   loadSnapshot,
   openEditorWindow,
   saveSettings,
@@ -23,6 +24,7 @@ export function WidgetApp() {
   const [expanded, setExpanded] = useState(false)
   const [atBottom, setAtBottom] = useState(false)
   const [showFirstRun, setShowFirstRun] = useState(false)
+  const [autostartError, setAutostartError] = useState<string | null>(null)
   const [pulse, setPulse] = useState(false)
   const viewportRef = useRef<HTMLDivElement>(null)
   const lastToggleRef = useRef(0)
@@ -107,15 +109,34 @@ export function WidgetApp() {
     void openEditorWindow()
   }
 
-  function chooseAutostart(enabled: boolean) {
+  async function chooseAutostart(enabled: boolean) {
+    let autostart: 'enabled' | 'disabled' = 'disabled'
+    let error: string | null = null
+    try {
+      const status = await applyAutostart(enabled)
+      if (enabled && status.registered) {
+        autostart = 'enabled'
+      } else if (enabled) {
+        error = status.disabledBySystem
+          ? 'Windows 已禁用该自启项，请到“启动应用”中手动启用'
+          : '自启注册失败，未写入注册表'
+      }
+    } catch (err) {
+      error = `自启注册失败：${String(err)}`
+    }
     const next = normalizeSettings({
       ...settings,
-      autostart: enabled ? 'enabled' : 'disabled',
+      autostart,
       autostartAsked: true,
     })
     setSnapshot((current) => (current ? { ...current, settings: next } : current))
-    setShowFirstRun(false)
     void saveSettings(next)
+    if (error) {
+      setAutostartError(error)
+      return
+    }
+    setAutostartError(null)
+    setShowFirstRun(false)
   }
 
   function openEditorFromPrompt() {
@@ -242,11 +263,16 @@ export function WidgetApp() {
             <div className="first-run-card" role="dialog" aria-modal="true" aria-label="首次运行">
               <div className="first-run-title">是否开机自动启动 Sotto？</div>
               <p className="first-run-copy">之后可在托盘或设置中修改。</p>
+              {autostartError ? (
+                <p className="first-run-error" role="alert">
+                  {autostartError}
+                </p>
+              ) : null}
               <div className="first-run-actions">
                 <button
                   className="primary-button"
                   type="button"
-                  onClick={() => chooseAutostart(true)}
+                  onClick={() => void chooseAutostart(true)}
                   data-testid="autostart-enable"
                 >
                   启用
@@ -254,7 +280,7 @@ export function WidgetApp() {
                 <button
                   className="secondary-button"
                   type="button"
-                  onClick={() => chooseAutostart(false)}
+                  onClick={() => void chooseAutostart(false)}
                   data-testid="autostart-disable"
                 >
                   暂不启用
@@ -268,7 +294,7 @@ export function WidgetApp() {
               className="first-run-close"
               type="button"
               aria-label="关闭"
-              onClick={() => chooseAutostart(false)}
+              onClick={() => void chooseAutostart(false)}
             >
               <CloseIcon size={14} />
             </button>

@@ -82,6 +82,33 @@ export async function openEditorWindow(): Promise<void> {
   await invoke('open_editor')
 }
 
+export interface AutostartStatus {
+  registered: boolean
+  disabledBySystem: boolean
+  command: string | null
+}
+
+const MOCK_AUTOSTART: AutostartStatus = {
+  registered: false,
+  disabledBySystem: false,
+  command: null,
+}
+
+export async function getAutostartStatus(): Promise<AutostartStatus> {
+  if (!isTauri()) return MOCK_AUTOSTART
+  return invoke<AutostartStatus>('get_autostart_status')
+}
+
+export async function applyAutostart(enabled: boolean): Promise<AutostartStatus> {
+  if (!isTauri()) return { ...MOCK_AUTOSTART, registered: enabled }
+  return invoke<AutostartStatus>('apply_autostart', { enabled })
+}
+
+export async function quitApp(): Promise<void> {
+  if (!isTauri()) return
+  await invoke('quit_app')
+}
+
 export function subscribeToChanges(callback: () => void): () => void {
   if (!isTauri()) return subscribeMock(callback)
   let disposed = false
