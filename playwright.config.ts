@@ -2,7 +2,8 @@ import { defineConfig } from '@playwright/test'
 
 export default defineConfig({
   testDir: 'tests/ui',
-  timeout: 30_000,
+  // 首次加载 Vite 冷启动在 Windows 上可能超过 30s，避免并行文件互相争用导致误报。
+  timeout: 60_000,
   fullyParallel: false,
   reporter: [['list']],
   webServer: {

@@ -621,3 +621,20 @@ pnpm tauri build --no-bundle
 - 主 crate 窗口几何测试：4 个，已加入 Windows CI
 
 未完成：`WM_QUERYENDSESSION` 的 Win11 关机/注销实机复测；DPI/多屏/RDP/UIPI 组合验收；系统透明 effective theme；代码签名与 License。
+
+---
+
+## 15. 最终回归（2026-10-18）
+
+| 项 | 结果 |
+| --- | --- |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib` | 4 passed |
+| `cargo test --manifest-path src-tauri/core/Cargo.toml` | 15 passed |
+| Vitest | 28 passed |
+| Playwright | 48 passed（首次冷启动 4 个导航超时，重跑全通过） |
+| `pnpm tauri build --no-bundle` | 通过，新 release 启动后进程响应正常 |
+
+修复：
+
+- `src-tauri/build.rs`：把 tauri-build 生成的 Windows 资源额外链接到非 bin 目标。此前 `cargo test --lib` 的测试 exe 没有 Common Controls v6 manifest，加载 comctl32 5.82 时找不到 `TaskDialogIndirect`，进程以 `0xc0000139` 退出。
+- `playwright.config.ts`：整测试超时从 30s 提高到 60s。Windows 上 Vite 首次冷启动并行加载可超过 30s，原配置会产生假失败；热启动后全部用例仍在数秒内完成。
