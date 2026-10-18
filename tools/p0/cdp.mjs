@@ -6,7 +6,10 @@ for await (const chunk of process.stdin) chunks.push(chunk)
 const expression = Buffer.concat(chunks).toString('utf8')
 
 const list = await (await fetch('http://127.0.0.1:9222/json/list')).json()
-const page = list.find((t) => t.type === 'page' && t.url.startsWith('http'))
+const match = process.env.CDP_MATCH
+const page = list.find(
+  (t) => t.type === 'page' && t.url.startsWith('http') && (!match || t.url.includes(match)),
+)
 if (!page) {
   console.error('no page target; targets=' + JSON.stringify(list.map((t) => t.url)))
   process.exit(1)

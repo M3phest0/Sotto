@@ -5,6 +5,7 @@ export interface ByteMeta {
   encoding: 'utf-8' | 'utf-16le' | 'utf-16be' | 'gbk'
   hasBom: boolean
   eol: 'crlf' | 'lf'
+  mixedEol: boolean
   trailingNewline: boolean
   hash: string
   size: number

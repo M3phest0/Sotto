@@ -195,7 +195,13 @@ fn read_settings(path: &Path) -> serde_json::Value {
 
 fn load_file(path: &Path) -> Result<OpenFile, String> {
     let bytes = fs::read(path).map_err(|err| format!("读取文件失败: {err}"))?;
-    let decoded = sotto_core::bytes::decode(&bytes)?;
+    let mut decoded = sotto_core::bytes::decode(&bytes)?;
+    // Windows 只读属性会让原子替换失败；提前按只读展示，避免保存时才报错。
+    if decoded.read_only_reason.is_none()
+        && fs::metadata(path).map(|meta| meta.permissions().readonly()).unwrap_or(false)
+    {
+        decoded.read_only_reason = Some("文件为只读属性；请取消只读或另存为".into());
+    }
     Ok(OpenFile {
         path: path.to_path_buf(),
         text: decoded.text,
@@ -216,12 +222,22 @@ fn empty_file(path: PathBuf) -> Result<OpenFile, String> {
 
 fn ensure_current(state: &AppState) -> Result<OpenFile, String> {
     let mut guard = state.current.lock().map_err(|_| "文件状态锁失效".to_string())?;
-    if let Some(file) = guard.as_ref() {
-        return Ok(file.clone());
-    }
-    let path = state.default_file.clone();
+    let path = guard
+        .as_ref()
+        .map(|file| file.path.clone())
+        .unwrap_or_else(|| state.default_file.clone());
+    // 每次都从磁盘重读：外部修改后 watcher 只能发事件，缓存必须在这里失效。
     let file = if path.exists() {
-        load_file(&path)?
+        match load_file(&path) {
+            Ok(file) => file,
+            Err(err) => {
+                // 外部写入瞬间可能读到半截/被占用，暂时沿用上一份缓存。
+                if let Some(cached) = guard.as_ref() {
+                    return Ok(cached.clone());
+                }
+                return Err(err);
+            }
+        }
     } else {
         empty_file(path)?
     };
@@ -1068,8 +1084,22 @@ pub fn run() {
         }))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
-                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                .with_handler(|app, shortcut, event| {
+                    if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        return;
+                    }
+                    use tauri_plugin_global_shortcut::{Code, Modifiers};
+                    if shortcut.matches(Modifiers::CONTROL | Modifiers::ALT, Code::KeyE) {
+                        if let Some(window) = app.get_webview_window("editor") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        } else {
+                            let app = app.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let _ = open_editor(app).await;
+                            });
+                        }
+                    } else {
                         toggle_locked(app);
                     }
                 })
@@ -1099,8 +1129,10 @@ pub fn run() {
             {
                 use tauri_plugin_global_shortcut::GlobalShortcutExt;
                 // 快捷键被其他程序占用时不应该阻止应用启动。
-                if let Err(err) = app.global_shortcut().register("ctrl+alt+l") {
-                    eprintln!("sotto shortcut register failed: {err}");
+                for shortcut in ["ctrl+alt+l", "ctrl+alt+e"] {
+                    if let Err(err) = app.global_shortcut().register(shortcut) {
+                        eprintln!("sotto shortcut register failed ({shortcut}): {err}");
+                    }
                 }
             }
             let autostart_launch = std::env::args().any(|arg| arg == "--autostart");

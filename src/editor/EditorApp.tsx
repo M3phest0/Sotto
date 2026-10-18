@@ -129,8 +129,18 @@ export function EditorApp() {
     savingRef.current = false
     pendingRef.current = false
     setConflictHash(null)
-    setReadOnlyReason(next.readOnlyReason ?? null)
-    if (next.readOnlyReason) setNotice(next.readOnlyReason)
+    const oversize = next.meta && (next.meta.size > 1_048_576 || next.meta.lineCount > 5000)
+      ? '文件超过 1MB 或 5000 行；只读展示，请拆分文件'
+      : null
+    const readOnly = next.readOnlyReason ?? oversize ?? null
+    setReadOnlyReason(readOnly)
+    if (readOnly) {
+      setNotice(readOnly)
+    } else if (next.meta?.mixedEol) {
+      const label = next.meta.eol === 'crlf' ? 'CRLF' : 'LF'
+      setNotice(`检测到混合换行；保存时将统一为 ${label}`)
+      console.info('sotto: mixed EOL, save will normalize to', next.meta.eol)
+    }
   }
 
   async function pickFile(): Promise<void> {

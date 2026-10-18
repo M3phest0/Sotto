@@ -67,12 +67,12 @@ Windows P0 的隔离 Rust 环境见 [docs/DEV-ENV.md](docs/DEV-ENV.md)。
 - 设置 schema 迁移（v0 → v1，含 `todo-list:*` 旧键迁移与未知字段告警）。
 - 编辑窗口 bounds 保存/恢复（900ms 防抖、跨屏 clamp、边框修正）。
 - 原生关闭拦截（标题栏 X / Alt+F4）、未保存确认、托盘退出走同一流程。
-- 托盘菜单（打开编辑/显示组件/锁定/主题/自启/退出）、左键切换组件、Ctrl+Alt+L 锁定。
+- 托盘菜单（打开编辑/显示组件/锁定/主题/自启/退出）、左键切换组件、Ctrl+Alt+E 打开编辑、Ctrl+Alt+L 锁定。
 - 开机自启（HKCU Run + StartupApproved 状态识别、登录启动延迟、单实例）。
 
 Windows CI 已通过（`windows-build`，含单元测试、Rust core 测试、前端构建、Tauri 构建与产物上传）。
 
-运行验证记录见 [docs/M2-REPORT.md](docs/M2-REPORT.md)。
+运行验证记录见 [docs/M2-REPORT.md](docs/M2-REPORT.md)；§9.2 验收结果见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。
 
 ## 限制
 

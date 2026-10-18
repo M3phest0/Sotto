@@ -31,6 +31,7 @@ pub struct ByteMeta {
     pub encoding: Encoding,
     pub has_bom: bool,
     pub eol: Eol,
+    pub mixed_eol: bool,
     pub trailing_newline: bool,
     pub hash: String,
     pub size: usize,
@@ -126,6 +127,7 @@ fn make_decoded(
     size: usize,
 ) -> DecodedFile {
     let eol = detect_eol(&raw_text);
+    let mixed_eol = is_mixed_eol(&raw_text);
     let trailing_newline = raw_text.ends_with('\n') || raw_text.ends_with('\r');
     let text = normalize_to_lf(&raw_text);
     let line_count = text.lines().count();
@@ -135,6 +137,7 @@ fn make_decoded(
             encoding,
             has_bom,
             eol,
+            mixed_eol,
             trailing_newline,
             hash,
             size,
@@ -157,6 +160,14 @@ pub fn detect_eol(text: &str) -> Eol {
     } else {
         Eol::Crlf
     }
+}
+
+/// Both CRLF and bare LF present. Saves normalize to the majority EOL; the
+/// frontend surfaces a one-time notice before that happens.
+pub fn is_mixed_eol(text: &str) -> bool {
+    let crlf = text.matches("\r\n").count();
+    let total_lf = text.matches('\n').count();
+    crlf > 0 && total_lf > crlf
 }
 
 /// Convert the editor's LF text back to the existing file's EOL/BOM.
@@ -213,6 +224,7 @@ mod tests {
         assert_eq!(decoded.meta.encoding, Encoding::Utf8);
         assert!(decoded.meta.has_bom);
         assert_eq!(decoded.meta.eol, Eol::Crlf);
+        assert!(!decoded.meta.mixed_eol);
         assert!(decoded.meta.trailing_newline);
         assert_eq!(decoded.meta.line_count, 3);
         assert_eq!(encode_existing(&decoded.text, &decoded.meta).unwrap(), raw);
@@ -233,6 +245,7 @@ mod tests {
         let raw = b"a\r\nb\r\nc\n";
         let decoded = decode(raw).unwrap();
         assert_eq!(decoded.meta.eol, Eol::Crlf);
+        assert!(decoded.meta.mixed_eol);
         assert_eq!(decoded.text, "a\nb\nc\n");
         assert_eq!(
             encode_existing(&decoded.text, &decoded.meta).unwrap(),
