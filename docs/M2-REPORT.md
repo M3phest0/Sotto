@@ -5,7 +5,7 @@
 
 ## 结论
 
-M2 功能完成并通过本机运行验证。唯一剩余项是推送后触发 GitHub Actions 的 Windows CI。
+M2 功能完成并通过本机运行验证；Windows CI 已通过（`windows-build`，见 Actions）。
 
 ## 已验证项
 
@@ -23,6 +23,7 @@ M2 功能完成并通过本机运行验证。唯一剩余项是推送后触发 G
 | 登录自启不弹首启 | 通过 | `--autostart` 启动前标记 `autostartAsked` |
 | 设置迁移 | 通过 | v0 字段迁移、旧 `todo-list:*` 键迁移、未知字段/新版本告警 |
 | 发布构建 | 通过 | `pnpm tauri build` 产出 NSIS 安装包（1.49 MiB） |
+| Windows CI | 通过 | GitHub Actions `windows-build`，全部步骤成功，产物已上传 |
 
 ## 自动化与工具
 
