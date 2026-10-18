@@ -28,9 +28,20 @@ export interface Task {
   text: string
 }
 
+export interface DisplayLine {
+  id: string
+  line: number
+  depth: number
+  /** 任务行可勾选；普通文本行仅展示。 */
+  task: Task | null
+  text: string
+}
+
 export interface TaskDocument {
   title: string | null
   tasks: Task[]
+  /** 组件按文档顺序显示的内容行（任务 + 普通文本），已跳过空行与代码块。 */
+  content: DisplayLine[]
   lines: string[]
   lineCount: number
 }
@@ -73,9 +84,14 @@ export interface Snapshot {
   path: string
   title: string | null
   tasks: Task[]
+  content: DisplayLine[]
   settings: Settings
   meta?: ByteMeta | null
   readOnlyReason?: string | null
+  /** 文件当前不存在（被移动/删除），不是空文件。 */
+  missing?: boolean
+  /** 读取失败但保留了缓存内容。 */
+  readError?: string | null
 }
 
 export interface EditorState {

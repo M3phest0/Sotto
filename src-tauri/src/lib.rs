@@ -159,7 +159,13 @@ struct OpenFile {
     text: String,
     meta: sotto_core::bytes::ByteMeta,
     read_only_reason: Option<String>,
+    /// 路径当前不存在（被移动/删除）；与“空文件”区分，避免静默重建。
+    missing: bool,
+    /// 有缓存但本次读取失败；继续展示缓存，同时让前端提示错误。
+    read_error: Option<String>,
 }
+
+const FIRST_RUN_MARKDOWN: &str = "# 今日待办\n\n- [ ] 写周报\n  - [ ] 收集数据\n- [ ] 买牛奶\n- [ ] 看文档\n- [ ] 整理桌面\n";
 
 struct AppState {
     current: Mutex<Option<OpenFile>>,
@@ -183,11 +189,22 @@ impl AppState {
         let documents = app.path().document_dir().map_err(|err| err.to_string())?;
         fs::create_dir_all(&config_dir).map_err(|err| err.to_string())?;
         fs::create_dir_all(&local_dir).map_err(|err| err.to_string())?;
+        let settings_path = config_dir.join("settings.json");
+        let default_file = documents.join("Sotto.md");
+        // 首次运行（还没有设置文件）且默认文件不存在时创建示例。
+        // 用户主动删除文件后 settings.json 仍在，此时不重建，走“文件不存在”状态。
+        if !settings_path.exists() && !default_file.exists() {
+            if let Err(err) =
+                sotto_core::atomic::write_atomic(&default_file, &sotto_core::bytes::encode_new(FIRST_RUN_MARKDOWN))
+            {
+                eprintln!("sotto first-run sample failed: {err}");
+            }
+        }
         Ok(Self {
             current: Mutex::new(None),
-            settings_path: config_dir.join("settings.json"),
+            settings_path,
             backups_dir: local_dir.join("backups"),
-            default_file: documents.join("Sotto.md"),
+            default_file,
             watcher: Mutex::new(None),
             watched_path: Mutex::new(None),
             last_hash: Arc::new(Mutex::new(String::new())),
@@ -207,6 +224,8 @@ struct SnapshotDto {
     settings: serde_json::Value,
     meta: Option<sotto_core::bytes::ByteMeta>,
     read_only_reason: Option<String>,
+    missing: bool,
+    read_error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -253,6 +272,8 @@ fn load_file(path: &Path) -> Result<OpenFile, String> {
         text: decoded.text,
         meta: decoded.meta,
         read_only_reason: decoded.read_only_reason,
+        missing: false,
+        read_error: None,
     })
 }
 
@@ -263,6 +284,8 @@ fn empty_file(path: PathBuf) -> Result<OpenFile, String> {
         text: decoded.text,
         meta: decoded.meta,
         read_only_reason: decoded.read_only_reason,
+        missing: true,
+        read_error: None,
     })
 }
 
@@ -275,11 +298,18 @@ fn ensure_current(state: &AppState) -> Result<OpenFile, String> {
     // 每次都从磁盘重读：外部修改后 watcher 只能发事件，缓存必须在这里失效。
     let file = if path.exists() {
         match load_file(&path) {
-            Ok(file) => file,
+            Ok(mut file) => {
+                file.missing = false;
+                file.read_error = None;
+                file
+            }
             Err(err) => {
-                // 外部写入瞬间可能读到半截/被占用，暂时沿用上一份缓存。
+                // 外部写入瞬间可能读到半截/被占用，暂时沿用上一份缓存，
+                // 但把错误带给前端，避免用户把旧内容当成最新状态。
                 if let Some(cached) = guard.as_ref() {
-                    return Ok(cached.clone());
+                    let mut cached = cached.clone();
+                    cached.read_error = Some(format!("无法读取文件：{err}"));
+                    return Ok(cached);
                 }
                 return Err(err);
             }
@@ -298,6 +328,8 @@ fn snapshot(state: &AppState, file: &OpenFile) -> SnapshotDto {
         settings: read_settings(&state.settings_path),
         meta: Some(file.meta.clone()),
         read_only_reason: file.read_only_reason.clone(),
+        missing: file.missing,
+        read_error: file.read_error.clone(),
     }
 }
 
@@ -387,6 +419,15 @@ fn save_markdown(
 ) -> Result<SaveResult, String> {
     let _ = revision;
     let file = ensure_current(&state)?;
+    // 文件被外部移动/删除时不要用空基线静默重建；让用户重新选择或另存。
+    if file.missing || !file.path.exists() {
+        return Ok(SaveResult {
+            status: "error",
+            disk_hash: Some(file.meta.hash.clone()),
+            meta: Some(file.meta),
+            message: Some("文件不存在，请重新选择文件；当前草稿仍在编辑器中".into()),
+        });
+    }
     if file.read_only_reason.is_some() {
         return Ok(SaveResult {
             status: "error",
@@ -442,6 +483,8 @@ fn save_markdown(
         text: content,
         meta: decoded.meta.clone(),
         read_only_reason: None,
+        missing: false,
+        read_error: None,
     };
     *state.current.lock().map_err(|_| "文件状态锁失效".to_string())? = Some(next);
     set_last_hash(&state, &decoded.meta.hash);
@@ -520,6 +563,93 @@ fn pick_markdown_file(
     ensure_watcher(&app, &state, &file.path)?;
     let _ = app.emit("file-changed", ());
     Ok(Some(snapshot(&state, &file)))
+}
+
+/// 保存对话框选中的路径补齐 Markdown 扩展名。
+fn with_markdown_extension(mut path: PathBuf) -> PathBuf {
+    let has_markdown_ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
+        .unwrap_or(false);
+    if !has_markdown_ext {
+        path.set_extension("md");
+    }
+    path
+}
+
+/// 新建/另存为共用的“选路径并写入”流程；返回 None 表示用户取消。
+fn write_markdown_to_chosen_path(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    suggested_name: &str,
+    content: &str,
+) -> Result<Option<SnapshotDto>, String> {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("Markdown", &["md", "markdown"])
+        .set_file_name(suggested_name)
+        .save_file()
+    else {
+        return Ok(None);
+    };
+    let path = with_markdown_extension(path);
+    let existing = fs::read(&path).ok();
+    let encoded = match existing.as_deref() {
+        Some(bytes) => match sotto_core::bytes::decode(bytes) {
+            Ok(decoded) => {
+                if let Err(err) = sotto_core::backup::create_backup(
+                    &state.backups_dir,
+                    &path,
+                    bytes,
+                    &decoded.meta,
+                    sotto_core::backup::BackupReason::BeforeWrite,
+                    now_ms(),
+                ) {
+                    eprintln!("sotto backup failed: {err}");
+                }
+                sotto_core::bytes::encode_existing(content, &decoded.meta)?
+            }
+            // 目标不是受支持的文本编码时按新文件写入，避免另存失败。
+            Err(_) => sotto_core::bytes::encode_new(content),
+        },
+        None => sotto_core::bytes::encode_new(content),
+    };
+    sotto_core::atomic::write_atomic(&path, &encoded)?;
+    let file = load_file(&path)?;
+    *state.current.lock().map_err(|_| "文件状态锁失效".to_string())? = Some(file.clone());
+    set_last_hash(state, &file.meta.hash);
+    ensure_watcher(app, state, &file.path)?;
+    let _ = app.emit("file-changed", ());
+    Ok(Some(snapshot(state, &file)))
+}
+
+#[tauri::command]
+fn new_markdown_file(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<SnapshotDto>, String> {
+    write_markdown_to_chosen_path(&app, &state, "待办.md", "# 今日待办\n\n")
+}
+
+#[tauri::command]
+fn save_markdown_as(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    content: String,
+) -> Result<Option<SnapshotDto>, String> {
+    if content.len() > 1_048_576 || content.lines().count() > 5000 {
+        return Err("文件超过 1MB 或 5000 行，另存已拒绝".into());
+    }
+    let suggested = {
+        let current = state.current.lock().map_err(|_| "文件状态锁失效".to_string())?;
+        current
+            .as_ref()
+            .and_then(|file| file.path.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("Sotto.md")
+            .to_string()
+    };
+    write_markdown_to_chosen_path(&app, &state, &suggested, &content)
 }
 
 fn read_settings_map(path: &Path) -> serde_json::Map<String, serde_json::Value> {
@@ -764,6 +894,195 @@ fn clamp_widget_to_work_area(window: &tauri::WebviewWindow) -> tauri::Result<()>
     if x != pos.x || y != pos.y {
         window.set_position(PhysicalPosition::new(x, y))?;
     }
+    Ok(())
+}
+
+/// 按内容尺寸调整组件窗口：
+/// - 高度最多占工作区 60%；
+/// - 保持右边缘不动，宽度变化向左扩展；
+/// - 底部超出工作区时向上移动。
+#[tauri::command]
+fn resize_widget(window: tauri::WebviewWindow, width: f64, height: f64) -> Result<(), String> {
+    resized_widget_bounds(&window, width, height)
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+}
+
+fn resized_widget_bounds(
+    window: &tauri::WebviewWindow,
+    width: f64,
+    height: f64,
+) -> tauri::Result<Option<(PhysicalSize<u32>, PhysicalPosition<i32>)>> {
+    let Some(computed) = compute_widget_bounds(
+        window,
+        width,
+        height,
+    )? else {
+        return Ok(None);
+    };
+    let (desired, pos) = computed;
+    let old_size = window.outer_size()?;
+    let old_pos = window.outer_position()?;
+    if old_size != desired {
+        window.set_size(desired)?;
+    }
+    if old_pos != pos {
+        window.set_position(pos)?;
+    }
+    Ok(Some((desired, pos)))
+}
+
+/// 纯计算部分：输入物理工作区/旧位置/旧尺寸，输出目标尺寸与位置。
+fn compute_widget_bounds(
+    window: &tauri::WebviewWindow,
+    width: f64,
+    height: f64,
+) -> tauri::Result<Option<(PhysicalSize<u32>, PhysicalPosition<i32>)>> {
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return Ok(None);
+    }
+    let scale = window.scale_factor()?;
+    let Some(monitor) = window.current_monitor()?.or(window.primary_monitor()?) else {
+        return Ok(None);
+    };
+    let area = monitor.work_area();
+    let old_pos = window.outer_position()?;
+    let old_size = window.outer_size()?;
+    Ok(Some(calculate_widget_bounds(
+        (area.position.x, area.position.y),
+        (area.size.width, area.size.height),
+        (old_pos.x, old_pos.y),
+        (old_size.width, old_size.height),
+        width,
+        height,
+        scale,
+    )))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn calculate_widget_bounds(
+    area_pos: (i32, i32),
+    area_size: (u32, u32),
+    old_pos: (i32, i32),
+    old_size: (u32, u32),
+    width_logical: f64,
+    height_logical: f64,
+    scale: f64,
+) -> (PhysicalSize<u32>, PhysicalPosition<i32>) {
+    let margin = (12.0 * scale).round() as i32;
+    let max_width = area_size.0.saturating_sub((margin * 2) as u32).max(1);
+    let max_height = ((area_size.1 as f64) * 0.6).floor().max(1.0) as u32;
+    let desired = PhysicalSize::new(
+        ((width_logical * scale).round() as u32).clamp(1, max_width),
+        ((height_logical * scale).round() as u32).clamp(1, max_height),
+    );
+    let right = old_pos.0 + old_size.0 as i32;
+    let mut x = right - desired.width as i32;
+    let mut y = old_pos.1;
+    let area_right = area_pos.0 + area_size.0 as i32;
+    let area_bottom = area_pos.1 + area_size.1 as i32;
+    if y + desired.height as i32 > area_bottom {
+        y = area_bottom - desired.height as i32;
+    }
+    let min_x = area_pos.0 + margin;
+    let max_x = area_right - margin - desired.width as i32;
+    let min_y = area_pos.1 + margin;
+    let max_y = area_bottom - margin - desired.height as i32;
+    x = x.clamp(min_x, max_x.max(min_x));
+    y = y.clamp(min_y, max_y.max(min_y));
+    (desired, PhysicalPosition::new(x, y))
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+
+    #[test]
+    fn caps_height_to_sixty_percent_of_work_area() {
+        let (size, pos) = calculate_widget_bounds(
+            (0, 0),
+            (1920, 1040),
+            (1000, 100),
+            (384, 520),
+            384.0,
+            670.0,
+            1.0,
+        );
+        assert_eq!(size.height, 624);
+        assert_eq!(pos.x + size.width as i32, 1000 + 384);
+    }
+
+    #[test]
+    fn expands_upward_when_bottom_would_overflow() {
+        let (size, pos) = calculate_widget_bounds(
+            (0, 0),
+            (1920, 1040),
+            (1000, 700),
+            (384, 300),
+            384.0,
+            500.0,
+            1.0,
+        );
+        assert_eq!(size.height, 500);
+        assert_eq!(pos.y + size.height as i32, 1028);
+    }
+
+    #[test]
+    fn scales_logical_size_and_respects_width_cap() {
+        let (size, _) = calculate_widget_bounds(
+            (0, 0),
+            (1000, 700),
+            (10, 10),
+            (400, 400),
+            900.0,
+            200.0,
+            2.0,
+        );
+        assert_eq!(size.width, 952);
+        assert_eq!(size.height, 400);
+    }
+}
+
+/// 打开应用数据目录（备份所在目录的父级）。
+#[tauri::command]
+fn open_data_dir(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let dir = state
+        .backups_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| state.backups_dir.clone());
+    fs::create_dir_all(&dir).map_err(|err| format!("创建数据目录失败: {err}"))?;
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&dir)
+            .spawn()
+            .map_err(|err| format!("打开数据目录失败: {err}"))?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = &dir;
+    }
+    Ok(())
+}
+
+/// 把组件移动到主屏工作区右下角，留 24 逻辑像素边距。
+#[tauri::command]
+fn reset_widget_position(window: tauri::WebviewWindow) -> Result<(), String> {
+    reset_widget_position_impl(&window).map_err(|err| err.to_string())
+}
+
+fn reset_widget_position_impl(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    let Some(monitor) = window.primary_monitor()?.or(window.current_monitor()?) else {
+        return Ok(());
+    };
+    let area = monitor.work_area();
+    let scale = window.scale_factor()?;
+    let margin = (24.0 * scale).round() as i32;
+    let size = window.outer_size()?;
+    let x = area.position.x + area.size.width as i32 - size.width as i32 - margin;
+    let y = area.position.y + area.size.height as i32 - size.height as i32 - margin;
+    window.set_position(PhysicalPosition::new(x.max(area.position.x), y.max(area.position.y)))?;
     Ok(())
 }
 
@@ -1104,8 +1423,8 @@ async fn open_editor(app: tauri::AppHandle) -> Result<(), String> {
         tauri::WebviewUrl::App("editor.html".into()),
     )
     .title("Sotto · 编辑")
-    .inner_size(980.0, 680.0)
-    .min_inner_size(720.0, 480.0)
+    .inner_size(960.0, 640.0)
+    .min_inner_size(760.0, 520.0)
     .additional_browser_args(WEBVIEW2_ARGS)
     .visible(false)
     .build()
@@ -1181,6 +1500,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             set_acrylic,
             set_desktop_layer,
+            resize_widget,
+            reset_widget_position,
+            open_data_dir,
             get_snapshot,
             open_markdown_file,
             save_markdown,
@@ -1188,6 +1510,8 @@ pub fn run() {
             save_settings,
             backup_current,
             pick_markdown_file,
+            new_markdown_file,
+            save_markdown_as,
             open_editor,
             quit_app,
             get_autostart_status,

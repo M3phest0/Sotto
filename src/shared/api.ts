@@ -17,6 +17,8 @@ interface RawSnapshot {
   settings: unknown
   meta?: ByteMeta | null
   readOnlyReason?: string | null
+  missing?: boolean
+  readError?: string | null
 }
 
 function mapSnapshot(raw: RawSnapshot): Snapshot {
@@ -26,9 +28,12 @@ function mapSnapshot(raw: RawSnapshot): Snapshot {
     path: raw.path,
     title: doc.title,
     tasks: doc.tasks,
+    content: doc.content,
     settings: normalizeSettings(raw.settings),
     meta: raw.meta ?? null,
     readOnlyReason: raw.readOnlyReason ?? null,
+    missing: raw.missing ?? false,
+    readError: raw.readError ?? null,
   }
 }
 
@@ -47,6 +52,18 @@ export async function openMarkdownFile(path: string): Promise<Snapshot> {
 export async function pickMarkdownFile(): Promise<Snapshot | null> {
   if (!isTauri()) return null
   const raw = await invoke<RawSnapshot | null>('pick_markdown_file')
+  return raw ? mapSnapshot(raw) : null
+}
+
+export async function newMarkdownFile(): Promise<Snapshot | null> {
+  if (!isTauri()) return null
+  const raw = await invoke<RawSnapshot | null>('new_markdown_file')
+  return raw ? mapSnapshot(raw) : null
+}
+
+export async function saveMarkdownAs(content: string): Promise<Snapshot | null> {
+  if (!isTauri()) return null
+  const raw = await invoke<RawSnapshot | null>('save_markdown_as', { content })
   return raw ? mapSnapshot(raw) : null
 }
 
@@ -72,6 +89,21 @@ export async function saveMarkdown(
 export async function backupCurrent(reason: 'interval' | 'editor-close'): Promise<boolean> {
   if (!isTauri()) return false
   return invoke<boolean>('backup_current', { reason })
+}
+
+export async function resizeWidgetWindow(width: number, height: number): Promise<void> {
+  if (!isTauri()) return
+  await invoke('resize_widget', { width, height })
+}
+
+export async function resetWidgetPosition(): Promise<void> {
+  if (!isTauri()) return
+  await invoke('reset_widget_position')
+}
+
+export async function openDataDir(): Promise<void> {
+  if (!isTauri()) return
+  await invoke('open_data_dir')
 }
 
 export async function openEditorWindow(): Promise<void> {

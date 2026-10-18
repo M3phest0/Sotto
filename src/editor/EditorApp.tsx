@@ -10,7 +10,7 @@ import {
 import { CloseIcon } from '../shared/icons'
 import { MarkdownInline } from '../shared/MarkdownInline'
 import { renderFullMarkdown } from '../shared/markdown'
-import { getProgress, parseTaskDocument } from '../shared/taskParser'
+import { getProgress, listContinuation, parseTaskDocument, taskSubtree } from '../shared/taskParser'
 import type { Settings, Snapshot, TaskDocument } from '../shared/types'
 import {
   loadSnapshot as loadMockSnapshot,
@@ -21,9 +21,14 @@ import {
   backupCurrent,
   getAutostartStatus,
   loadSnapshot as loadBackendSnapshot,
+  newMarkdownFile,
+  openDataDir,
+  openMarkdownFile,
   pickMarkdownFile,
   quitApp,
+  resetWidgetPosition,
   saveMarkdown,
+  saveMarkdownAs,
   saveSettings,
   subscribeToChanges,
 } from '../shared/api'
@@ -56,6 +61,12 @@ function statusLabel(state: SaveState): string {
   return '未修改'
 }
 
+type PendingSwitch =
+  | { kind: 'picker' }
+  | { kind: 'new' }
+  | { kind: 'path'; path: string }
+  | { kind: 'text'; text: string; path: string }
+
 export function EditorApp() {
   const useBackend = isTauri()
   const initial = useMemo(() => (useBackend ? null : loadMockSnapshot()), [useBackend])
@@ -73,9 +84,16 @@ export function EditorApp() {
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [showCloseConfirm, setShowCloseConfirm] = useState(false)
+  const [pendingSwitch, setPendingSwitch] = useState<PendingSwitch | null>(null)
+  const [showReloadConfirm, setShowReloadConfirm] = useState(false)
   const [conflictHash, setConflictHash] = useState<string | null>(null)
   const conflictHashRef = useRef<string | null>(null)
   const [readOnlyReason, setReadOnlyReason] = useState<string | null>(initial?.readOnlyReason ?? null)
+  const [missing, setMissing] = useState(initial?.missing ?? false)
+  const [readError, setReadError] = useState<string | null>(initial?.readError ?? null)
+  const missingRef = useRef(initial?.missing ?? false)
+  const autosaveTimerRef = useRef<number | null>(null)
+  const [compositionTick, setCompositionTick] = useState(0)
   const [autostartNote, setAutostartNote] = useState<string | null>(null)
   const [editorNonce, setEditorNonce] = useState(0)
   const revisionRef = useRef(0)
@@ -83,6 +101,7 @@ export function EditorApp() {
   const savingRef = useRef(false)
   const pendingRef = useRef(false)
   const blockedRef = useRef(false)
+  const saveErrorRef = useRef(false)
   const dirtyRef = useRef(false)
   const composingRef = useRef(false)
   const exitAfterCloseRef = useRef(false)
@@ -128,14 +147,24 @@ export function EditorApp() {
     blockedRef.current = false
     savingRef.current = false
     pendingRef.current = false
+    saveErrorRef.current = false
     setConflictHash(null)
+    setMissing(next.missing ?? false)
+    setReadError(next.readError ?? null)
+    missingRef.current = next.missing ?? false
+    // 切换文件后默认回到任务视图，避免大文件延续全文预览造成卡顿。
+    setPreviewMode('tasks')
     const oversize = next.meta && (next.meta.size > 1_048_576 || next.meta.lineCount > 5000)
       ? '文件超过 1MB 或 5000 行；只读展示，请拆分文件'
       : null
     const readOnly = next.readOnlyReason ?? oversize ?? null
     setReadOnlyReason(readOnly)
-    if (readOnly) {
+    if (next.missing) {
+      setNotice('文件不存在，请重新选择文件；当前草稿仍保留在编辑器中')
+    } else if (readOnly) {
       setNotice(readOnly)
+    } else if (next.readError) {
+      setNotice(next.readError)
     } else if (next.meta?.mixedEol) {
       const label = next.meta.eol === 'crlf' ? 'CRLF' : 'LF'
       setNotice(`检测到混合换行；保存时将统一为 ${label}`)
@@ -143,26 +172,119 @@ export function EditorApp() {
     }
   }
 
-  async function pickFile(): Promise<void> {
+  function pickFile(): void {
+    // 原生选择器会立即切换后端当前文件；有草稿时先确认，再打开选择器。
+    if (dirtyRef.current || conflictHashRef.current) {
+      setPendingSwitch({ kind: 'picker' })
+      return
+    }
+    openPicker()
+  }
+
+  function rememberFile(next: Snapshot): void {
+    const updated = normalizeSettings({
+      ...next.settings,
+      lastFile: next.path,
+      recentFiles: [next.path, ...next.settings.recentFiles.filter((item) => item !== next.path)].slice(0, 5),
+    })
+    setSettings(updated)
+    void saveSettings(updated)
+  }
+
+  function openPicker(): void {
     if (!useBackend) {
       fileInputRef.current?.click()
       return
     }
-    try {
-      const next = await pickMarkdownFile()
-      if (!next) return
-      applySnapshot(next)
-      const updated = normalizeSettings({
-        ...next.settings,
-        lastFile: next.path,
-        recentFiles: [next.path, ...next.settings.recentFiles.filter((item) => item !== next.path)].slice(0, 5),
-      })
-      setSettings(updated)
-      void saveSettings(updated)
-      setNotice(`已加载 ${next.path}`)
-    } catch (err) {
-      setNotice(String(err))
+    void (async () => {
+      try {
+        const next = await pickMarkdownFile()
+        if (!next) return
+        applySnapshot(next)
+        rememberFile(next)
+        setNotice(`已加载 ${next.path}`)
+      } catch (err) {
+        setNotice(String(err))
+      }
+    })()
+  }
+
+  function requestNewFile(): void {
+    if (dirtyRef.current || conflictHashRef.current) {
+      setPendingSwitch({ kind: 'new' })
+      return
     }
+    openNewFile()
+  }
+
+  function openNewFile(): void {
+    if (!useBackend) {
+      setNotice('浏览器预览不支持新建文件；请在 Windows 构建中使用')
+      return
+    }
+    void (async () => {
+      try {
+        const next = await newMarkdownFile()
+        if (!next) return
+        applySnapshot(next)
+        rememberFile(next)
+        setNotice(`已新建 ${next.path}`)
+      } catch (err) {
+        setNotice(String(err))
+      }
+    })()
+  }
+
+  function requestOpenPath(path: string): void {
+    if (!path) return
+    if (dirtyRef.current || conflictHashRef.current) {
+      setPendingSwitch({ kind: 'path', path })
+      return
+    }
+    loadPath(path)
+  }
+
+  function loadPath(path: string): void {
+    if (!useBackend) {
+      setNotice('浏览器预览只能通过文件输入框打开文件')
+      return
+    }
+    void (async () => {
+      try {
+        const next = await openMarkdownFile(path)
+        applySnapshot(next)
+        rememberFile(next)
+        setNotice(`已加载 ${next.path}`)
+      } catch (err) {
+        // 最近文件可能已被移动/删除：失败后从列表移除，避免反复点同一个坏路径。
+        const updated = normalizeSettings({
+          ...settings,
+          recentFiles: settings.recentFiles.filter((item) => item !== path),
+        })
+        setSettings(updated)
+        void saveSettings(updated)
+        setNotice(`无法打开 ${path}：${String(err)}`)
+      }
+    })()
+  }
+
+  function saveAsNow(): void {
+    if (!useBackend) {
+      setNotice('浏览器预览不支持另存为；请在 Windows 构建中使用')
+      return
+    }
+    const content = textareaRef.current?.value ?? text
+    void (async () => {
+      try {
+        const next = await saveMarkdownAs(content)
+        if (!next) return
+        applySnapshot(next)
+        rememberFile(next)
+        setNotice(`已另存为 ${next.path}`)
+      } catch (err) {
+        setNotice(String(err))
+      }
+    })()
   }
 
   useEffect(() => {
@@ -295,12 +417,17 @@ export function EditorApp() {
   }, [useBackend, settings.autostart])
 
   useEffect(() => {
-    if (!dirty || composingRef.current || blockedRef.current || readOnlyReason) return
+    if (!dirty || composingRef.current || blockedRef.current || readOnlyReason || missing) return
     const timer = window.setTimeout(() => {
-      void persistNow()
+      // 定时器触发时可能刚好进入输入法组合，回调里再确认一次。
+      if (!composingRef.current) void persistNow()
     }, 1000)
-    return () => window.clearTimeout(timer)
-  }, [dirty, text, readOnlyReason])
+    autosaveTimerRef.current = timer
+    return () => {
+      window.clearTimeout(timer)
+      if (autosaveTimerRef.current === timer) autosaveTimerRef.current = null
+    }
+  }, [dirty, text, readOnlyReason, missing, compositionTick])
 
   useEffect(() => {
     if (!notice) return
@@ -310,6 +437,12 @@ export function EditorApp() {
 
   async function persistNow(): Promise<boolean> {
     if (blockedRef.current) return false
+    // 输入法组合期间不保存：否则会把拼音中间态写入磁盘。
+    if (composingRef.current) return false
+    if (missingRef.current) {
+      setNotice('文件不存在，请重新选择文件；当前草稿仍保留')
+      return false
+    }
     if (readOnlyReason) {
       setNotice(readOnlyReason)
       return false
@@ -329,12 +462,14 @@ export function EditorApp() {
         const result = await saveMarkdown(baseHashRef.current, revisionAtSave, content)
         if (result.status === 'conflict') {
           blockedRef.current = true
+          saveErrorRef.current = true
           setConflictHash(result.diskHash)
           setSaveState('error')
           setNotice(result.message ?? '磁盘文件已变化；未覆盖')
           return false
         }
         if (result.status === 'error') {
+          saveErrorRef.current = true
           setSaveState('error')
           setNotice(result.message ?? '保存失败')
           return false
@@ -350,16 +485,20 @@ export function EditorApp() {
         pendingRef.current = true
         setSaveState('saving')
       }
+      saveErrorRef.current = false
       return true
     } catch (err) {
+      saveErrorRef.current = true
       setSaveState('error')
       setNotice(String(err))
       return false
     } finally {
       savingRef.current = false
-      if (pendingRef.current && revisionRef.current !== revisionAtSave) {
+      // 无论在途保存期间排队的请求是否还有新内容，都要清掉 pending，
+      // 否则 revision 未变化时 waitForSaveIdle 会一直等到超时。
+      if (pendingRef.current) {
         pendingRef.current = false
-        void persistNow()
+        if (revisionRef.current !== revisionAtSave) void persistNow()
       }
     }
   }
@@ -425,6 +564,12 @@ export function EditorApp() {
       setNotice(readOnlyReason)
       return
     }
+    // 保存失败时不要关窗：用户已经选择“保存”，关掉就等同于静默丢弃。
+    if (saveErrorRef.current) {
+      setSaveState('error')
+      setNotice('保存失败，窗口未关闭；请重试或选择放弃')
+      return
+    }
     await finishClose()
   }
 
@@ -442,11 +587,18 @@ export function EditorApp() {
 
   function handleCompositionStart(): void {
     composingRef.current = true
+    // 取消已经排队的自动保存；组合结束时会重新排队。
+    if (autosaveTimerRef.current !== null) {
+      window.clearTimeout(autosaveTimerRef.current)
+      autosaveTimerRef.current = null
+    }
   }
 
   function handleCompositionEnd(event: CompositionEvent<HTMLTextAreaElement>): void {
     composingRef.current = false
     markChanged(event.currentTarget.value)
+    // dirty 可能本来就是 true，单靠 effect 依赖不会重新触发，用 tick 强制排队。
+    setCompositionTick((value) => value + 1)
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
@@ -456,17 +608,64 @@ export function EditorApp() {
       const start = el.selectionStart
       const end = el.selectionEnd
       if (event.shiftKey) {
-        const before = el.value.slice(0, start)
-        const lineStart = before.lastIndexOf('\n') + 1
-        const segment = el.value.slice(lineStart, start)
-        const remove = Math.min(4, segment.match(/^ {1,4}/)?.[0].length ?? 0)
-        if (remove > 0) {
-          el.setRangeText('', lineStart, lineStart + remove, 'preserve')
+        // 反缩进选区覆盖的每一行，而不是只处理光标所在行。
+        const lineStart = el.value.lastIndexOf('\n', start - 1) + 1
+        let blockEnd = end
+        if (blockEnd > start && el.value[blockEnd - 1] === '\n') blockEnd -= 1
+        const block = el.value.slice(lineStart, blockEnd)
+        let cursor = lineStart
+        let removedBeforeStart = 0
+        let removedBeforeEnd = 0
+        let changed = false
+        const nextBlock = block
+          .split('\n')
+          .map((line) => {
+            const remove = Math.min(4, line.match(/^ {1,4}/)?.[0].length ?? 0)
+            if (remove > 0) changed = true
+            if (cursor < start) removedBeforeStart += remove
+            if (cursor < end) removedBeforeEnd += remove
+            cursor += line.length + 1
+            return line.slice(remove)
+          })
+          .join('\n')
+        if (changed) {
+          el.setRangeText(nextBlock, lineStart, blockEnd, 'preserve')
+          el.selectionStart = Math.max(lineStart, start - removedBeforeStart)
+          el.selectionEnd = Math.max(lineStart, end - removedBeforeEnd)
           markChanged(el.value)
         }
-      } else {
+      } else if (start === end) {
         el.setRangeText('    ', start, end, 'end')
         markChanged(el.value)
+      } else {
+        // 有选区时按行缩进，不能用空格替换选中的文字。
+        const lineStart = el.value.lastIndexOf('\n', start - 1) + 1
+        const blockEnd = end > lineStart && el.value[end - 1] === '\n' ? end - 1 : end
+        const block = el.value.slice(lineStart, blockEnd)
+        const indented = block.replace(/^/gm, '    ')
+        el.setRangeText(indented, lineStart, blockEnd, 'select')
+        markChanged(el.value)
+      }
+      return
+    }
+    if (
+      event.key === 'Enter' &&
+      !event.shiftKey &&
+      !event.nativeEvent.isComposing &&
+      !composingRef.current
+    ) {
+      const el = event.currentTarget
+      if (el.selectionStart === el.selectionEnd) {
+        const caret = el.selectionStart
+        const lineStart = el.value.lastIndexOf('\n', caret - 1) + 1
+        const lineEnd = el.value.indexOf('\n', caret)
+        const line = el.value.slice(lineStart, lineEnd === -1 ? undefined : lineEnd)
+        const next = listContinuation(line)
+        if (next && caret - lineStart >= next.contentStart) {
+          event.preventDefault()
+          el.setRangeText(`\n${next.insert}`, caret, caret, 'end')
+          markChanged(el.value)
+        }
       }
       return
     }
@@ -494,15 +693,18 @@ export function EditorApp() {
     const el = textareaRef.current
     if (!task || !el) return
     const source = el.value
-    const offset = lineOffset(source, task.line)
-    const rest = source.slice(offset)
-    const nextNewline = rest.indexOf('\n')
-    const lineText = nextNewline === -1 ? rest : rest.slice(0, nextNewline)
-    const checkboxMatch = /\[[ xX]\]/.exec(lineText)
-    if (!checkboxMatch) return
-    const checkboxOffset = offset + (checkboxMatch.index ?? 0)
     el.focus()
-    el.setRangeText(checked ? '[x]' : '[ ]', checkboxOffset, checkboxOffset + 3, 'end')
+    // 父项勾选/取消时同步整棵子任务；复选框等长替换，行偏移保持不变。
+    for (const target of taskSubtree(preview.tasks, task.id)) {
+      const offset = lineOffset(source, target.line)
+      const rest = source.slice(offset)
+      const nextNewline = rest.indexOf('\n')
+      const lineText = nextNewline === -1 ? rest : rest.slice(0, nextNewline)
+      const checkboxMatch = /\[[ xX]\]/.exec(lineText)
+      if (!checkboxMatch) continue
+      const checkboxOffset = offset + (checkboxMatch.index ?? 0)
+      el.setRangeText(checked ? '[x]' : '[ ]', checkboxOffset, checkboxOffset + 3, 'end')
+    }
     markChanged(el.value, true)
   }
 
@@ -541,6 +743,33 @@ export function EditorApp() {
     updateSettings({ autostart: value }, true)
   }
 
+  function applyTextSwitch(nextText: string, nextPath: string): void {
+    setText(nextText)
+    setPath(nextPath)
+    revisionRef.current += 1
+    setRevision(revisionRef.current)
+    setPreview(parseTaskDocument(nextText))
+    setRenderedRevision(revisionRef.current)
+    setEditorNonce((value) => value + 1)
+    setDirty(false)
+    setMissing(false)
+    setReadError(null)
+    missingRef.current = false
+    setPreviewMode('tasks')
+    const oversize = nextText.length > 1_048_576 || nextText.split('\n').length > 5000
+    setReadOnlyReason(oversize ? '文件超过 1MB 或 5000 行；只读展示，请拆分文件' : null)
+    setSaveState('saved')
+    saveDocumentText(nextText)
+    const next = normalizeSettings({
+      ...settings,
+      lastFile: nextPath,
+      recentFiles: [nextPath, ...settings.recentFiles.filter((item) => item !== nextPath)].slice(0, 5),
+    })
+    setSettings(next)
+    saveSettings(next)
+    setNotice(`已加载 ${nextPath}`)
+  }
+
   function handleFile(event: ChangeEvent<HTMLInputElement>): void {
     if (useBackend) {
       event.currentTarget.value = ''
@@ -552,31 +781,53 @@ export function EditorApp() {
     const reader = new FileReader()
     reader.onload = () => {
       const nextText = typeof reader.result === 'string' ? reader.result : ''
-      const nextPath = file.name
-      setText(nextText)
-      setPath(nextPath)
-      revisionRef.current += 1
-      setRevision(revisionRef.current)
-      setPreview(parseTaskDocument(nextText))
-      setRenderedRevision(revisionRef.current)
-      setEditorNonce((value) => value + 1)
-      setDirty(false)
-      setSaveState('saved')
-      saveDocumentText(nextText)
-      const next = normalizeSettings({
-        ...settings,
-        lastFile: nextPath,
-        recentFiles: [nextPath, ...settings.recentFiles.filter((item) => item !== nextPath)].slice(0, 5),
-      })
-      setSettings(next)
-      saveSettings(next)
-      setNotice(`已加载 ${nextPath}`)
+      if (dirtyRef.current || conflictHashRef.current) {
+        setPendingSwitch({ kind: 'text', text: nextText, path: file.name })
+        return
+      }
+      applyTextSwitch(nextText, file.name)
     }
     reader.readAsText(file, 'utf-8')
     event.currentTarget.value = ''
   }
 
-  async function reloadFromDisk(): Promise<void> {
+  async function confirmSwitch(saveFirst: boolean): Promise<void> {
+    const target = pendingSwitch
+    if (!target) return
+    if (saveFirst) {
+      await persistNow()
+      const settled = await waitForSaveIdle()
+      if (!settled) {
+        setNotice('保存超时，请重试或选择放弃')
+        return
+      }
+      if (blockedRef.current || conflictHashRef.current) return
+      if (readOnlyReason) {
+        setNotice(readOnlyReason)
+        return
+      }
+      if (saveErrorRef.current) {
+        setSaveState('error')
+        setNotice('保存失败，未切换文件')
+        return
+      }
+    }
+    setPendingSwitch(null)
+    if (target.kind === 'picker') openPicker()
+    else if (target.kind === 'new') openNewFile()
+    else if (target.kind === 'path') loadPath(target.path)
+    else applyTextSwitch(target.text, target.path)
+  }
+
+  function reloadFromDisk(): void {
+    if (dirtyRef.current || conflictHashRef.current) {
+      setShowReloadConfirm(true)
+      return
+    }
+    void doReloadFromDisk()
+  }
+
+  async function doReloadFromDisk(): Promise<void> {
     try {
       const next = await loadBackendSnapshot()
       applySnapshot(next)
@@ -611,6 +862,12 @@ export function EditorApp() {
           </span>
         </div>
         <div className="editor-actions">
+          <button className="editor-button" type="button" title="新建 Markdown 文件" onClick={requestNewFile}>
+            新建
+          </button>
+          <button className="editor-button" type="button" title="另存为 Markdown 文件" onClick={saveAsNow}>
+            另存为
+          </button>
           <button
             className="editor-button"
             type="button"
@@ -624,7 +881,7 @@ export function EditorApp() {
             value=""
             onChange={(event) => {
               const selected = event.currentTarget.value
-              if (selected) setNotice(`最近文件：${selected}（请在 Windows 构建后从磁盘加载）`)
+              if (selected) requestOpenPath(selected)
             }}
             aria-label="最近文件"
           >
@@ -639,8 +896,8 @@ export function EditorApp() {
             className="editor-button primary"
             type="button"
             onClick={saveNow}
-            disabled={Boolean(readOnlyReason)}
-            title={readOnlyReason ?? '保存'}
+            disabled={Boolean(readOnlyReason) || missing}
+            title={missing ? '文件不存在，请重新选择文件' : (readOnlyReason ?? '保存')}
           >
             保存
           </button>
@@ -656,6 +913,22 @@ export function EditorApp() {
           onChange={handleFile}
         />
       </header>
+
+      {missing ? (
+        <div className="editor-missing" role="alert">
+          <span>文件不存在（可能被移动或删除）· 当前草稿仍保留</span>
+          <button type="button" className="primary" onClick={() => pickFile()}>
+            重新选择文件
+          </button>
+        </div>
+      ) : readError ? (
+        <div className="editor-missing" role="alert" title={readError}>
+          <span>无法读取文件 · 当前显示的是缓存内容</span>
+          <button type="button" onClick={() => void doReloadFromDisk()}>
+            重试读取
+          </button>
+        </div>
+      ) : null}
 
       {readOnlyReason ? (
         <div className="editor-readonly" role="status">
@@ -859,7 +1132,15 @@ export function EditorApp() {
           </div>
 
           <div className="settings-actions">
-            <button className="editor-button" type="button" onClick={() => setNotice('Windows 构建后会打开 LocalAppData 数据目录')}>
+            <button
+              className="editor-button"
+              type="button"
+              onClick={() => {
+                void openDataDir()
+                  .then(() => setNotice('已打开数据目录'))
+                  .catch((err) => setNotice(`打开数据目录失败：${String(err)}`))
+              }}
+            >
               打开数据目录
             </button>
             <button
@@ -867,7 +1148,9 @@ export function EditorApp() {
               type="button"
               onClick={() => {
                 updateSettings({ windowPosition: null })
-                setNotice('位置已重置')
+                void resetWidgetPosition()
+                  .then(() => setNotice('组件已移到主屏右下角'))
+                  .catch((err) => setNotice(`重置位置失败：${String(err)}`))
               }}
             >
               重置位置
@@ -889,7 +1172,17 @@ export function EditorApp() {
         <span className={`save-state state-${saveState}`} data-testid="save-state">
           {statusLabel(saveState)}
         </span>
+        {saveState === 'error' && !conflictHash ? (
+          <button className="status-retry" type="button" onClick={() => void persistNow()}>
+            重试
+          </button>
+        ) : null}
         <span>{lastSavedAt ? `上次保存 ${new Date(lastSavedAt).toLocaleTimeString('zh-CN')}` : dirty ? '尚未保存' : '已加载'}</span>
+        {preview.title === null ? (
+          <span className="editor-title-hint" title="第一个 # 标题会作为组件标题；没有时使用文件名">
+            未找到 # 标题 · 组件显示文件名
+          </span>
+        ) : null}
         <span className="status-spacer" />
         <span>{fileStem(path)} · {text.length.toLocaleString('zh-CN')} 字符</span>
       </footer>
@@ -922,6 +1215,54 @@ export function EditorApp() {
                   保存并关闭
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {pendingSwitch ? (
+        <div className="editor-modal-backdrop">
+          <div className="editor-modal" role="dialog" aria-modal="true" aria-label="切换文件">
+            <div className="modal-title">当前文件有未保存修改</div>
+            <p className="modal-copy">
+              {pendingSwitch.kind === 'picker'
+                ? '选择新文件前，请先保存或放弃当前修改。'
+                : '加载新文件会替换当前内容，请先保存或放弃本次修改。'}
+            </p>
+            <div className="modal-actions">
+              <button className="danger-button" type="button" onClick={() => void confirmSwitch(false)}>
+                {pendingSwitch.kind === 'picker' ? '放弃并选择' : '放弃并切换'}
+              </button>
+              <button className="editor-button" type="button" onClick={() => setPendingSwitch(null)}>
+                取消
+              </button>
+              <button className="editor-button primary" type="button" onClick={() => void confirmSwitch(true)}>
+                {pendingSwitch.kind === 'picker' ? '保存并选择' : '保存并切换'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showReloadConfirm ? (
+        <div className="editor-modal-backdrop">
+          <div className="editor-modal" role="dialog" aria-modal="true" aria-label="重新加载">
+            <div className="modal-title">重新加载会丢弃当前草稿</div>
+            <p className="modal-copy">磁盘上的版本会替换编辑器中的内容，未保存的修改无法恢复。</p>
+            <div className="modal-actions">
+              <button
+                className="danger-button"
+                type="button"
+                onClick={() => {
+                  setShowReloadConfirm(false)
+                  void doReloadFromDisk()
+                }}
+              >
+                放弃并重新加载
+              </button>
+              <button className="editor-button" type="button" onClick={() => setShowReloadConfirm(false)}>
+                取消
+              </button>
             </div>
           </div>
         </div>

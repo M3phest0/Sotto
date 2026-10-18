@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react'
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type MouseEvent,
+  type WheelEvent,
+} from 'react'
 import { GripIcon, LockIcon, PencilIcon, CheckIcon, CloseIcon } from '../shared/icons'
 import { MarkdownInline } from '../shared/MarkdownInline'
 import { getProgress, getVisibleTasks } from '../shared/taskParser'
@@ -7,11 +15,12 @@ import {
   applyAutostart,
   loadSnapshot,
   openEditorWindow,
+  resizeWidgetWindow,
   saveSettings,
   subscribeToChanges,
 } from '../shared/api'
 import { DEFAULT_SETTINGS, normalizeSettings } from '../shared/settings'
-import { setupDesktopLayer, startWindowDrag } from '../shared/desktop'
+import { isTauri, setupDesktopLayer, startWindowDrag } from '../shared/desktop'
 import './widget.css'
 
 function fileStem(path: string): string {
@@ -27,6 +36,7 @@ export function WidgetApp() {
   const [autostartError, setAutostartError] = useState<string | null>(null)
   const [pulse, setPulse] = useState(false)
   const viewportRef = useRef<HTMLDivElement>(null)
+  const cardRef = useRef<HTMLDivElement>(null)
   const lastToggleRef = useRef(0)
 
   useEffect(() => {
@@ -68,21 +78,51 @@ export function WidgetApp() {
 
   const settings = snapshot?.settings ?? DEFAULT_SETTINGS
   const allTasks = snapshot?.tasks ?? []
-  const visibleTasks = useMemo(
-    () => getVisibleTasks(allTasks, settings.hideCompleted),
+  // 组件显示原文本的前几行：任务行带状态，普通文本行原样展示。
+  const visibleTaskIds = useMemo(
+    () => new Set(getVisibleTasks(allTasks, settings.hideCompleted).map((task) => task.id)),
     [allTasks, settings.hideCompleted],
   )
+  const visibleLines = useMemo(
+    () => (snapshot?.content ?? []).filter((line) => !line.task || visibleTaskIds.has(line.task.id)),
+    [snapshot?.content, visibleTaskIds],
+  )
   const limit = expanded ? settings.expanded : settings.compact
-  const shownTasks = visibleTasks.slice(0, limit)
-  const overflowCount = Math.max(0, visibleTasks.length - limit)
+  const shownLines = visibleLines.slice(0, limit)
+  const overflowCount = Math.max(0, visibleLines.length - limit)
   const { completed, total } = getProgress(allTasks)
   const title = snapshot?.title ?? fileStem(snapshot?.path ?? '')
+  const missing = snapshot?.missing ?? false
+  const readError = snapshot?.readError ?? null
 
   const style = {
     '--widget-width': `${settings.width}px`,
     '--widget-font-size': `${settings.fontSize}px`,
     '--visible-rows': limit,
   } as CSSProperties
+
+  // 原生窗口跟随内容高度；Rust 侧再按工作区 60% 封顶并保持右边缘。
+  useEffect(() => {
+    if (!isTauri() || !snapshot) return
+    const frame = window.requestAnimationFrame(() => {
+      const card = cardRef.current
+      if (!card) return
+      const viewport = card.querySelector<HTMLElement>('.task-viewport')
+      const header = card.querySelector<HTMLElement>('.widget-header')
+      const footer = card.querySelector<HTMLElement>('.widget-footer')
+      const alert = card.querySelector<HTMLElement>('.widget-alert')
+      const rowsHeight = Math.min(viewport?.scrollHeight ?? 38, limit * 38 + 4)
+      const cardHeight =
+        (header?.offsetHeight ?? 46) +
+        rowsHeight +
+        (footer?.offsetHeight ?? 30) +
+        (alert?.offsetHeight ?? 0) +
+        2
+      const chrome = settings.theme === 'acrylic' ? 0 : 24
+      void resizeWidgetWindow(settings.width + chrome, cardHeight + chrome).catch(() => {})
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [snapshot?.text, snapshot?.path, expanded, limit, settings.width, settings.fontSize, settings.theme, missing, readError])
 
   function toggleExpanded() {
     const now = Date.now()
@@ -103,6 +143,15 @@ export function WidgetApp() {
     const el = viewportRef.current
     if (!el) return
     setAtBottom(el.scrollTop + el.clientHeight >= el.scrollHeight - 2)
+  }
+
+  function handleWheel(event: WheelEvent<HTMLDivElement>) {
+    const el = viewportRef.current
+    if (!el) return
+    // 列表自身可滚动时保留原生行为；在标题/页脚上滚动则转交给列表。
+    if ((event.target as HTMLElement).closest('.task-viewport')) return
+    if (el.scrollHeight <= el.clientHeight) return
+    el.scrollTop += event.deltaY
   }
 
   function openEditor() {
@@ -152,7 +201,9 @@ export function WidgetApp() {
   }
 
   const footerText = (() => {
-    if (visibleTasks.length === 0) {
+    if (missing) return '文件不存在 · 请重新选择'
+    if (readError) return '读取失败 · 打开编辑器查看'
+    if (visibleLines.length === 0) {
       return allTasks.length > 0 ? '全部完成' : '打开编辑器'
     }
     if (!expanded && overflowCount === 0) return '点击展开'
@@ -162,7 +213,9 @@ export function WidgetApp() {
   })()
 
   const emptyText = (() => {
-    if (visibleTasks.length > 0) return null
+    if (missing) return '文件不存在 · 点铅笔重新选择'
+    if (visibleLines.length > 0) return null
+    if (readError) return '无法读取文件 · 打开编辑器查看详情'
     if (allTasks.length > 0) return '全部完成'
     if ((snapshot?.text ?? '').trim().length === 0) return '文件为空 · 点铅笔打开编辑器'
     return '没有任务 · 点铅笔打开编辑器'
@@ -170,7 +223,10 @@ export function WidgetApp() {
 
   if (!snapshot) {
     return (
-      <div className={`widget-root theme-${settings.theme}`} data-testid="widget">
+      <div
+        className={`widget-root theme-${settings.theme}${isTauri() ? ' is-native' : ''}`}
+        data-testid="widget"
+      >
         <div className="widget-card" style={style} data-testid="widget-card">
           <div className="empty-state">加载中…</div>
         </div>
@@ -179,11 +235,16 @@ export function WidgetApp() {
   }
 
   return (
-    <div className={`widget-root theme-${settings.theme}`} data-testid="widget">
+    <div
+      className={`widget-root theme-${settings.theme}${isTauri() ? ' is-native' : ''}`}
+      data-testid="widget"
+    >
       <div
+        ref={cardRef}
         className={`widget-card ${pulse ? 'is-pulsing' : ''}`}
         style={style}
         onClick={handleCardClick}
+        onWheel={handleWheel}
         data-testid="widget-card"
       >
         <header className="widget-header">
@@ -232,23 +293,31 @@ export function WidgetApp() {
               {emptyText}
             </div>
           ) : (
-            shownTasks.map((task) => (
+            shownLines.map((line) => (
               <div
-                className={`task-row ${task.checked ? 'is-done' : ''}`}
-                key={task.id}
-                style={{ paddingLeft: `${Math.min(task.depth, 3) * 16 + 8}px` }}
-                data-testid="task-row"
+                className={`task-row ${line.task ? '' : 'is-text'} ${line.task?.checked ? 'is-done' : ''}`}
+                key={line.id}
+                style={{ paddingLeft: `${Math.min(line.depth, 3) * 16 + 8}px` }}
+                data-testid={line.task ? 'task-row' : 'text-row'}
               >
-                <span className="task-bullet" aria-hidden="true">
-                  {task.checked ? <CheckIcon size={11} /> : <span className="pending-dot" />}
-                </span>
-                <span className="task-text" title={task.text}>
-                  <MarkdownInline text={task.text} />
+                {line.task ? (
+                  <span className="task-bullet" aria-hidden="true">
+                    {line.task.checked ? <CheckIcon size={11} /> : <span className="pending-dot" />}
+                  </span>
+                ) : null}
+                <span className="task-text" title={line.text}>
+                  <MarkdownInline text={line.text} />
                 </span>
               </div>
             ))
           )}
         </div>
+
+        {readError && visibleLines.length > 0 ? (
+          <div className="widget-alert" role="alert" title={readError} data-testid="read-error">
+            读取失败 · 显示缓存内容
+          </div>
+        ) : null}
 
         <div className={`widget-footer ${overflowCount > 0 ? 'has-overflow' : ''}`} data-testid="widget-footer">
           <span>{footerText}</span>

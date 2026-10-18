@@ -6,6 +6,9 @@ export const DOCUMENT_KEY = 'sotto:document'
 export const SETTINGS_KEY = 'sotto:settings'
 export const ASKED_KEY = 'sotto:autostart-asked'
 export const CHANNEL_NAME = 'sotto:sync'
+// 仅浏览器 mock 使用：模拟原生快照里的文件缺失/读取错误状态。
+export const MOCK_MISSING_KEY = 'sotto:mock-missing'
+export const MOCK_READ_ERROR_KEY = 'sotto:mock-read-error'
 
 // M1 使用的键名；读取时迁移到 sotto:*，写回后删除旧键。
 export const LEGACY_SETTINGS_KEY = 'todo-list:settings'
@@ -47,7 +50,8 @@ function safeLocalStorage(): Storage | null {
 export function loadDocumentText(): string {
   const storage = safeLocalStorage()
   const value = storage?.getItem(DOCUMENT_KEY)
-  return value && value.trim().length > 0 ? value : SAMPLE_MARKDOWN
+  // 键存在时保留空字符串，才能测试空文件状态；只有从未写入过才用示例。
+  return value !== null && value !== undefined ? value : SAMPLE_MARKDOWN
 }
 
 export function saveDocumentText(text: string): void {
@@ -114,12 +118,16 @@ export function loadSnapshot(): Snapshot {
   const text = loadDocumentText()
   const doc: TaskDocument = parseTaskDocument(text)
   const settings = loadSettings()
+  const storage = safeLocalStorage()
   return {
     text,
     path: MOCK_FILE_PATH,
     title: doc.title,
     tasks: doc.tasks,
+    content: doc.content,
     settings,
+    missing: storage?.getItem(MOCK_MISSING_KEY) === '1',
+    readError: storage?.getItem(MOCK_READ_ERROR_KEY) || null,
   }
 }
 

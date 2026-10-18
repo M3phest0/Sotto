@@ -23,6 +23,18 @@ test('widget dark and expanded', async ({ page }) => {
   await page.getByTestId('widget-card').screenshot({ path: 'docs/screenshots/widget-expanded.png' })
 })
 
+test('widget shows plain text lines in document order', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('sotto:document', '随手记\n- [ ] 买菜\n下午三点开会\n')
+  })
+  await page.goto('/')
+  await expect(page.getByTestId('text-row')).toHaveCount(2)
+  await expect(page.getByTestId('task-row')).toHaveCount(1)
+  await expect(page.getByTestId('text-row').first()).toContainText('随手记')
+  await expect(page.getByTestId('text-row').last()).toContainText('下午三点开会')
+  await expect(page.getByTestId('widget-footer')).toContainText('点击展开')
+})
+
 test('widget acrylic theme', async ({ page }) => {
   await page.addInitScript(() => {
     localStorage.setItem(

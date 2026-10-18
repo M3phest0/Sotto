@@ -17,10 +17,12 @@
   flex-direction: column;
   width: var(--widget-width);
   max-width: calc(100vw - 24px);
-  max-height: calc(100vh - 24px);
+  /* 浏览器预览用 60vh 模拟工作区上限；原生窗口由 Rust 按工作区 60% 调整。 */
+  max-height: min(calc(100vh - 24px), 60vh);
   border-radius: 16px;
   border: 1px solid rgba(255, 255, 255, 0.09);
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.38);
+  /* 窗口只比卡片大 12px，外阴影会被窗口边缘裁成一块矩形暗板。 */
+  box-shadow: none;
   color: #e9ecf4;
   background: rgba(14, 16, 21, 0.96);
   overflow: hidden;
@@ -43,10 +45,10 @@
     rgba(18, 22, 30, 0.55);
   border-color: rgba(255, 255, 255, 0.18);
   backdrop-filter: blur(20px) saturate(142%);
-  box-shadow: 0 22px 56px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.11);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.11);
 }
 
-/* 亚克力作用在整个原生窗口上；让卡片铺满窗口，避免卡片外露出第二块玻璃。 */
+/* 亚克力作用在整个原生窗口上；窗口随内容调整高度，卡片铺满窗口。 */
 .theme-acrylic.widget-root {
   padding: 0;
 }
@@ -54,17 +56,26 @@
 .theme-acrylic .widget-card {
   width: 100%;
   max-width: 100%;
-  height: 100%;
-  max-height: 100%;
+  height: auto;
+  max-height: min(100vh, 60vh);
 }
 
 .theme-acrylic .task-viewport {
-  flex: 1 1 auto;
-  max-height: none;
+  flex: 0 1 auto;
+  max-height: calc(var(--visible-rows) * 38px);
+}
+
+/* 原生窗口尺寸由 resize_widget 按内容和工作区计算，不再受视口比例二次限制。 */
+.is-native .widget-card {
+  max-height: calc(100vh - 24px);
+}
+
+.is-native.theme-acrylic .widget-card {
+  max-height: 100vh;
 }
 
 .widget-card.is-pulsing {
-  box-shadow: 0 22px 58px rgba(0, 0, 0, 0.42), 0 0 0 1px rgba(124, 156, 255, 0.16);
+  box-shadow: 0 0 0 1px rgba(124, 156, 255, 0.16);
 }
 
 .widget-card:hover {
@@ -145,7 +156,9 @@
 }
 
 .task-viewport {
-  max-height: min(calc(var(--visible-rows) * 38px), 60vh);
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: calc(var(--visible-rows) * 38px);
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: none;
@@ -174,6 +187,11 @@
 
 .task-row.is-done {
   opacity: 0.52;
+}
+
+/* 普通文本行没有复选框，按原文本顺序显示。 */
+.task-row.is-text .task-text {
+  color: rgba(226, 232, 246, 0.72);
 }
 
 .task-bullet {
@@ -225,6 +243,18 @@
   padding: 0 10px;
   font-size: 12px;
   color: rgba(211, 220, 240, 0.46);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.widget-alert {
+  flex: none;
+  padding: 5px 13px;
+  border-top: 1px solid rgba(255, 190, 92, 0.16);
+  background: rgba(255, 176, 64, 0.08);
+  color: rgba(255, 213, 150, 0.82);
+  font-size: 10.5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

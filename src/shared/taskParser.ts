@@ -1,8 +1,9 @@
-import type { Task, TaskDocument } from './types'
+import type { DisplayLine, Task, TaskDocument } from './types'
 
 const LIST_ITEM = /^([ \t]*)([-*+]|\d+[.)])([ \t]+)(.*)$/
 const CHECKBOX = /^\[([ xX])\](?:[ \t]+(.*))?$/
-const FENCE = /^([ \t]{0,3})(`{3,}|~{3,})(.*)$/
+// 缩进由 fenceInfo 结合列表上下文判断：列表项内的围栏可以缩进 4 格以上。
+const FENCE = /^([ \t]*)(`{3,}|~{3,})(.*)$/
 const H1 = /^#[ \t]+(.+?)[ \t]*$/
 
 export function stripBom(text: string): string {
@@ -26,11 +27,16 @@ function isBlockquote(line: string): boolean {
   return line.replace(/^[ \t]*/, '').startsWith('>')
 }
 
-function fenceInfo(line: string): { char: string; length: number; rest: string } | null {
+function fenceInfo(line: string): { char: string; length: number; rest: string; indent: number } | null {
   const match = FENCE.exec(line)
   if (!match) return null
   const fence = match[2]
-  return { char: fence[0], length: fence.length, rest: match[3] }
+  return {
+    char: fence[0],
+    length: fence.length,
+    rest: match[3],
+    indent: leadingColumns(match[1]),
+  }
 }
 
 function isFrontMatterStart(lines: string[]): number {
@@ -46,9 +52,12 @@ export function parseTaskDocument(raw: string): TaskDocument {
   const normalized = normalizeNewlines(raw)
   const lines = normalized.split('\n')
   const tasks: Task[] = []
+  const content: DisplayLine[] = []
   const indentationStack: number[] = []
   let title: string | null = null
+  let titleLine = -1
   let fence: { char: string; length: number } | null = null
+  let inComment = false
   const start = isFrontMatterStart(lines)
 
   for (let lineIndex = start; lineIndex < lines.length; lineIndex += 1) {
@@ -63,8 +72,19 @@ export function parseTaskDocument(raw: string): TaskDocument {
     }
 
     const openingFence = fenceInfo(line)
-    if (openingFence) {
+    // 顶层缩进 >= 4 的是缩进代码块；列表项内部的围栏按列表内容缩进判断。
+    if (openingFence && (indentationStack.length > 0 || openingFence.indent <= 3)) {
       fence = { char: openingFence.char, length: openingFence.length }
+      continue
+    }
+
+    if (inComment) {
+      if (line.includes('-->')) inComment = false
+      continue
+    }
+    const commentStart = line.indexOf('<!--')
+    if (commentStart >= 0 && line.slice(0, commentStart).trim().length === 0) {
+      if (!line.slice(commentStart + 4).includes('-->')) inComment = true
       continue
     }
 
@@ -72,8 +92,13 @@ export function parseTaskDocument(raw: string): TaskDocument {
 
     if (title === null) {
       const h1 = H1.exec(line)
-      if (h1) title = h1[1].trim()
+      if (h1) {
+        title = h1[1].trim()
+        titleLine = lineIndex
+      }
     }
+
+    if (line.trim().length === 0) continue
 
     const leading = line.match(/^[ \t]*/)?.[0] ?? ''
     const lineIndent = leadingColumns(leading)
@@ -83,7 +108,19 @@ export function parseTaskDocument(raw: string): TaskDocument {
     }
 
     const item = LIST_ITEM.exec(line)
-    if (!item) continue
+    if (!item) {
+      // 标题行已作为组件标题，正文里的普通文本按原样显示。
+      if (lineIndex === titleLine) continue
+      const text = line.replace(/^[ \t]{0,3}#{1,6}[ \t]+/, '').trim()
+      if (text.length === 0) continue
+      const depth =
+        indentationStack.length > 0 &&
+        lineIndent > indentationStack[indentationStack.length - 1]
+          ? indentationStack.length
+          : 0
+      content.push({ id: `line-${lineIndex}`, line: lineIndex, depth, task: null, text })
+      continue
+    }
 
     const itemIndent = leadingColumns(item[1])
     while (indentationStack.length > 0 && itemIndent <= indentationStack[indentationStack.length - 1]) {
@@ -94,21 +131,33 @@ export function parseTaskDocument(raw: string): TaskDocument {
 
     const rest = item[4]
     const check = CHECKBOX.exec(rest)
-    if (!check) continue
+    if (!check) {
+      // 普通列表项也显示，只是没有完成状态。
+      const plain = rest.trimEnd()
+      if (plain.length > 0) {
+        content.push({ id: `line-${lineIndex}`, line: lineIndex, depth, task: null, text: plain })
+      }
+      continue
+    }
 
     const checked = check[1].toLowerCase() === 'x'
     const text = (check[2] ?? '').trimEnd()
-    tasks.push({
+    const task: Task = {
       id: `task-${lineIndex}`,
       index: tasks.length,
       line: lineIndex,
       depth,
       checked,
       text,
-    })
+    }
+    tasks.push(task)
+    // 空任务仍计入进度，但没有可显示的文字，不占组件行数。
+    if (text.length > 0) {
+      content.push({ id: `line-${lineIndex}`, line: lineIndex, depth, task, text })
+    }
   }
 
-  return { title, tasks, lines, lineCount: lines.length }
+  return { title, tasks, content, lines, lineCount: lines.length }
 }
 
 export function toggleTaskAtLine(source: string, lineIndex: number, checked: boolean): string {
@@ -119,6 +168,42 @@ export function toggleTaskAtLine(source: string, lineIndex: number, checked: boo
   if (!match) return source
   lines[lineIndex] = `${match[1]}[${checked ? 'x' : ' '}]${match[3]}`
   return lines.join('\n')
+}
+
+export interface ListContinuation {
+  /** 新行在列表标记之后的内容起点（相对行首的字符数）。 */
+  contentStart: number
+  /** 下一行要插入的缩进 + 标记 + 间隔（任务项再带 `[ ] `）。 */
+  insert: string
+}
+
+/** 按当前行生成回车续写内容；非列表行返回 null。 */
+export function listContinuation(line: string): ListContinuation | null {
+  const match = LIST_ITEM.exec(line)
+  if (!match) return null
+  const [, indent, marker, spacing, rest] = match
+  const ordered = /^(\d+)([.)])$/.exec(marker)
+  const nextMarker = ordered ? `${Number(ordered[1]) + 1}${ordered[2]}` : marker
+  const isTask = CHECKBOX.test(rest)
+  return {
+    contentStart: indent.length + marker.length + spacing.length,
+    insert: `${indent}${nextMarker}${spacing}${isTask ? '[ ] ' : ''}`,
+  }
+}
+
+/** 返回任务自身及其全部后代（按文档顺序）。 */
+export function taskSubtree(tasks: Task[], id: string): Task[] {
+  const { children } = buildTaskHierarchy(tasks)
+  const byId = new Map(tasks.map((task) => [task.id, task]))
+  const result: Task[] = []
+  const walk = (taskId: string): void => {
+    const task = byId.get(taskId)
+    if (!task) return
+    result.push(task)
+    for (const childId of children.get(taskId) ?? []) walk(childId)
+  }
+  walk(id)
+  return result
 }
 
 export function getProgress(tasks: Task[]): { completed: number; total: number } {
