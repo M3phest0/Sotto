@@ -62,7 +62,7 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedFile, String> {
             text,
             Encoding::Utf16Le,
             true,
-            Some("UTF-16 LE 文件只读展示；请另存为 UTF-8".into()),
+            Some("UTF-16 LE 文件只读展示；请转为 UTF-8 后编辑".into()),
             hash,
             size,
         ));
@@ -74,7 +74,7 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedFile, String> {
             text,
             Encoding::Utf16Be,
             true,
-            Some("UTF-16 BE 文件只读展示；请另存为 UTF-8".into()),
+            Some("UTF-16 BE 文件只读展示；请转为 UTF-8 后编辑".into()),
             hash,
             size,
         ));
@@ -90,7 +90,7 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedFile, String> {
             text.into_owned(),
             Encoding::Gbk,
             false,
-            Some("GBK/GB18030 文件只读展示；请另存为 UTF-8".into()),
+            Some("GBK/GB18030 文件只读展示；请转为 UTF-8 后编辑".into()),
             hash,
             size,
         ));
@@ -175,7 +175,7 @@ pub fn is_mixed_eol(text: &str) -> bool {
 /// remove blank lines.
 pub fn encode_existing(text_lf: &str, meta: &ByteMeta) -> Result<Vec<u8>, String> {
     if meta.encoding != Encoding::Utf8 {
-        return Err("该文件编码只读；请另存为 UTF-8".into());
+        return Err("该文件编码只读；请转为 UTF-8 后编辑".into());
     }
     let text = normalize_to_lf(text_lf);
     let text = match meta.eol {

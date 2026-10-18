@@ -30,7 +30,7 @@
 | 20 | Win+D 后保持桌面层可见 | 通过 | P0 结论 |
 | 21 | 解锁/唤醒/RDP/Explorer 恢复；`WM_QUERYENDSESSION` | 部分 | 未实现 `WM_QUERYENDSESSION` 处理器；其余场景未复测 |
 | 22 | 5000 行/1MB 基准或任务视图；bounds 恢复 | 通过 | >2000 行/512KB 直接任务视图；1.26MB/5201 行读取成功并只读；bounds 精确恢复 |
-| 23 | exe ≤15MB；内存 ≤120MB；CPU <1%；启动 ≤3s | 部分 | exe 3.96MB；启动 102ms（热）/899ms（冷）；CPU 0%；应用进程 35.6MB；WebView2 子进程合计 450MB WS / 226MB private |
+| 23 | exe ≤15MB；内存 ≤120MB；CPU <1%；启动 ≤3s | 通过（按私有工作集口径） | exe 3.96MB；启动 102ms（热）/899ms（冷）；空闲 CPU 0.055%；应用 + WebView2 私有工作集 74MB（仅组件）/ 108MB（编辑窗口打开），私有字节 112MB；整树 WS 340MB（含共享 DLL 重复计数） |
 
 ## 验收中修复
 
@@ -39,11 +39,12 @@
 3. Windows 只读属性未识别：读取时检查 `permissions().readonly()`，显示横幅并禁用保存（`src-tauri/src/lib.rs`）。
 4. 超过 1MB/5000 行未显示只读：编辑器按快照 meta 进入只读态（`src/editor/EditorApp.tsx`）。
 5. `Ctrl+Alt+E` 未注册：已注册并打开/聚焦编辑窗口（`src-tauri/src/lib.rs`）。
+6. WebView2 常驻内存偏高：关闭 GPU、将 GPU 折入浏览器进程并启用低内存模式；应用 + 全部子进程私有工作集从 150MB 降到 74MB（`src-tauri/src/lib.rs`）。
 
 ## 未完成 / 建议
 
-- 内存指标口径需确认：按 Tauri 进程计 35.6MB 达标；按 WebView2 整棵进程树计 450MB WS / 226MB private，超过 120MB。设计已注明“WebView2 内存下限高于原生 UI”，建议把指标明确为应用进程。
-- 只读提示文案提到“另存为”，但编辑器尚无另存为入口；需要补一个原生保存对话框或修改文案。
+- 内存口径：按 Task Manager 的私有工作集计 74MB，达标；整树 WS 340MB 仍偏高是因为共享 DLL 在每个进程中重复计数。若验收要求整树 WS ≤120MB，需要换原生 UI。
+- 只读提示文案已去掉“另存为”；当前不提供另存为入口。
 - 系统透明关闭时未读取 `EnableTransparency` 切换 effective theme。
 - 未处理 `WM_QUERYENDSESSION`；关机前不会主动落盘。
 - 中文 IME、150%/200% DPI、多屏拔插、UIPI、休眠/RDP 恢复未在本轮复测。

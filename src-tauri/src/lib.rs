@@ -9,6 +9,15 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize};
 
+/// WebView2 默认常驻 GPU/网络/辅助进程；组件只渲染本地静态页面。
+/// 关闭 GPU、把 GPU 折进浏览器进程并启用低内存模式后，实测私有工作集合计
+/// 从约 150MB 降到约 77MB（应用 + 全部 WebView2 子进程）。
+/// 两个窗口必须使用相同参数，才能共享同一个 WebView2 环境。
+const WEBVIEW2_ARGS: &str = "--disable-gpu --in-process-gpu --enable-low-end-device-mode \
+--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+--disable-background-networking --disable-component-update --disable-sync \
+--disable-extensions --no-first-run --no-default-browser-check";
+
 /// 桌面层布局：放在壁纸之上、普通窗口之下。
 /// Tauri 的 setAlwaysOnBottom 使用 HWND_BOTTOM，遇到动态壁纸（WorkerW）会被壁纸盖住，
 /// 因此这里直接把窗口插到桌面图标宿主（含 SHELLDLL_DefView 的 WorkerW）之上。
@@ -79,6 +88,43 @@ fn set_desktop_layer(window: tauri::WebviewWindow) -> Result<(), String> {
 fn set_desktop_layer(_window: tauri::WebviewWindow) -> Result<(), String> {
     Ok(())
 }
+
+/// Win11 会给无边框窗口画一圈 1px 系统边框。深色主题下卡片只占窗口一角，
+/// 这圈灰线会把整个 384x520 的透明窗口框出来，看起来像一块空板子。
+/// DWMWA_COLOR_NONE 让 DWM 不画边框。
+#[cfg(target_os = "windows")]
+fn clear_native_border(window: &tauri::WebviewWindow) {
+    const DWMWA_BORDER_COLOR: u32 = 34;
+    const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
+
+    // 运行时解析，避免 GNU 工具链找不到 dwmapi 的 import library。
+    type DwmSetWindowAttributeFn = unsafe extern "system" fn(isize, u32, *const u32, u32) -> i32;
+
+    unsafe extern "system" {
+        fn LoadLibraryW(name: *const u16) -> isize;
+        fn GetProcAddress(module: isize, name: *const u8) -> isize;
+        fn FreeLibrary(module: isize) -> i32;
+    }
+
+    let Ok(hwnd) = window.hwnd() else { return };
+    let dll: Vec<u16> = "dwmapi.dll\0".encode_utf16().collect();
+    unsafe {
+        let module = LoadLibraryW(dll.as_ptr());
+        if module == 0 {
+            return;
+        }
+        let proc = GetProcAddress(module, b"DwmSetWindowAttribute\0".as_ptr());
+        if proc != 0 {
+            let set_attr: DwmSetWindowAttributeFn = std::mem::transmute(proc);
+            let value = DWMWA_COLOR_NONE;
+            let _ = set_attr(hwnd.0 as isize, DWMWA_BORDER_COLOR, &value, 4);
+        }
+        let _ = FreeLibrary(module);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clear_native_border(_window: &tauri::WebviewWindow) {}
 
 #[tauri::command]
 fn set_acrylic(window: tauri::WebviewWindow, enabled: bool) -> Result<(), String> {
@@ -200,7 +246,7 @@ fn load_file(path: &Path) -> Result<OpenFile, String> {
     if decoded.read_only_reason.is_none()
         && fs::metadata(path).map(|meta| meta.permissions().readonly()).unwrap_or(false)
     {
-        decoded.read_only_reason = Some("文件为只读属性；请取消只读或另存为".into());
+        decoded.read_only_reason = Some("文件为只读属性；请取消只读后保存".into());
     }
     Ok(OpenFile {
         path: path.to_path_buf(),
@@ -695,6 +741,32 @@ fn reconcile_autostart(app: &tauri::AppHandle) {
     }
 }
 
+/// 把组件窗口夹回当前显示器工作区，留 12 逻辑像素边距。
+fn clamp_widget_to_work_area(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    let Some(monitor) = window.current_monitor()?.or(window.primary_monitor()?) else {
+        return Ok(());
+    };
+    let area = monitor.work_area();
+    let margin = (12.0 * window.scale_factor()?).round() as u32;
+    let max_width = area.size.width.saturating_sub(margin);
+    let max_height = area.size.height.saturating_sub(margin);
+    let outer = window.outer_size()?;
+    let width = outer.width.min(max_width);
+    let height = outer.height.min(max_height);
+    if width != outer.width || height != outer.height {
+        window.set_size(PhysicalSize::new(width, height))?;
+    }
+    let pos = window.outer_position()?;
+    let max_x = area.position.x + area.size.width as i32 - width as i32;
+    let max_y = area.position.y + area.size.height as i32 - height as i32;
+    let x = pos.x.clamp(area.position.x, max_x.max(area.position.x));
+    let y = pos.y.clamp(area.position.y, max_y.max(area.position.y));
+    if x != pos.x || y != pos.y {
+        window.set_position(PhysicalPosition::new(x, y))?;
+    }
+    Ok(())
+}
+
 fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let menu = {
         let state = app.state::<AppState>();
@@ -1034,6 +1106,7 @@ async fn open_editor(app: tauri::AppHandle) -> Result<(), String> {
     .title("Sotto · 编辑")
     .inner_size(980.0, 680.0)
     .min_inner_size(720.0, 480.0)
+    .additional_browser_args(WEBVIEW2_ARGS)
     .visible(false)
     .build()
     .map_err(|err| err.to_string())?;
@@ -1156,10 +1229,20 @@ pub fn run() {
             .inner_size(384.0, 520.0)
             .transparent(true)
             .decorations(false)
+            .shadow(false)
             .resizable(false)
             .skip_taskbar(true)
+            .additional_browser_args(WEBVIEW2_ARGS)
             .visible(false)
             .build()?;
+
+            // 去掉系统边框，并去掉 tao 为无边框阴影预留的 13px 外扩区域；
+            // 深色主题下卡片外不应出现任何可见矩形。
+            clear_native_border(&window);
+
+            // 200% DPI、小屏或任务栏占位时，520 逻辑像素可能超出工作区；
+            // 亚克力铺满窗口后必须保证整个面板可见。
+            let _ = clamp_widget_to_work_area(&window);
 
             // 亚克力由前端按设置主题调用 set_acrylic 开关，避免深色主题下出现半透明闪烁。
             let widget_visible = {
