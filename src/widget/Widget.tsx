@@ -62,6 +62,21 @@ export function Widget() {
     }
   }, [refresh])
 
+  // 跨天自动刷新"今日"计数与 DDL 相对日期。
+  useEffect(() => {
+    let timer = 0
+    const schedule = () => {
+      const now = new Date()
+      const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 2)
+      timer = window.setTimeout(() => {
+        refresh()
+        schedule()
+      }, next.getTime() - now.getTime())
+    }
+    schedule()
+    return () => window.clearTimeout(timer)
+  }, [refresh])
+
   const settings = data?.settings
   const activeTasks = useMemo(
     () =>

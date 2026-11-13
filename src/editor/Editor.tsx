@@ -5,13 +5,16 @@ import {
   deleteTasks,
   exportData,
   getData,
+  getStartupWarning,
   hideEditor,
   importData,
+  listBackups,
   onFocusTask,
   onOpenView,
   onStateChanged,
   openDataDir,
   pickSoundFile,
+  restoreBackup,
   saveSettings,
   saveTask,
   setAutostart,
@@ -21,7 +24,7 @@ import {
   undoTomato,
 } from '../shared/api'
 import { playTomato } from '../shared/sound'
-import type { AppData, Settings, Task, Tomato } from '../shared/types'
+import type { AppData, BackupEntry, Settings, Task, Tomato } from '../shared/types'
 import './editor.css'
 
 type View = 'tasks' | 'stats' | 'settings'
@@ -60,6 +63,9 @@ export function Editor() {
   const [loading, setLoading] = useState(true)
   const [toast, setToast] = useState('')
   const [dragId, setDragId] = useState<string | null>(null)
+  const [backups, setBackups] = useState<BackupEntry[]>([])
+  const [backupName, setBackupName] = useState('')
+  const [startupWarning, setStartupWarning] = useState<string | null>(null)
   const titleRef = useRef<HTMLInputElement>(null)
   const draftTimer = useRef<number | null>(null)
   const toastTimer = useRef<number | null>(null)
@@ -84,11 +90,42 @@ export function Editor() {
       .catch(() => setLoading(false))
   }, [applyData])
 
-  const showToast = useCallback((text: string) => {
+  const showToast = useCallback((text: string, duration = 2000) => {
     setToast(text)
     if (toastTimer.current) window.clearTimeout(toastTimer.current)
-    toastTimer.current = window.setTimeout(() => setToast(''), 2000)
+    toastTimer.current = window.setTimeout(() => setToast(''), duration)
   }, [])
+
+  // 启动时的数据警告（文件损坏/从备份恢复），常驻横幅直到手动关闭。
+  useEffect(() => {
+    getStartupWarning()
+      .then((warning) => {
+        if (warning) setStartupWarning(warning)
+      })
+      .catch(() => {})
+  }, [])
+
+  // 跨天自动刷新：过了 0 点重算"今日"与统计。
+  useEffect(() => {
+    let timer = 0
+    const schedule = () => {
+      const now = new Date()
+      const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 2)
+      timer = window.setTimeout(() => {
+        refresh()
+        schedule()
+      }, next.getTime() - now.getTime())
+    }
+    schedule()
+    return () => window.clearTimeout(timer)
+  }, [refresh])
+
+  useEffect(() => {
+    if (view !== 'settings') return
+    listBackups()
+      .then(setBackups)
+      .catch(() => {})
+  }, [view])
 
   // 页面缩放：Ctrl + = / - / 0，或 Ctrl + 滚轮。
   const zoomRef = useRef(1)
@@ -333,6 +370,18 @@ export function Editor() {
     saveSettings(next).catch(() => showToast('设置保存失败'))
   }
 
+  const restoreFromBackup = () => {
+    if (!backupName) return
+    if (!window.confirm(`从备份 ${backupName} 恢复？当前数据会先自动备份。`)) return
+    restoreBackup(backupName)
+      .then(() => {
+        showToast('已从备份恢复')
+        setBackupName('')
+        listBackups().then(setBackups).catch(() => {})
+      })
+      .catch((err) => showToast(String(err)))
+  }
+
   const changeTheme = (key: keyof Settings['theme'], value: string) => {
     applySettings({ theme: { ...settings.theme, [key]: value } })
   }
@@ -425,6 +474,14 @@ export function Editor() {
       </aside>
 
       <main className="detail">
+        {startupWarning && (
+          <div className="warning-banner">
+            <span>{startupWarning}</span>
+            <button className="link" onClick={() => setStartupWarning(null)}>
+              知道了
+            </button>
+          </div>
+        )}
         {view === 'tasks' && draft && (
           <TaskDetail
             task={draft}
@@ -489,6 +546,10 @@ export function Editor() {
                 .catch(() => showToast('导入失败'))
             }
             onOpenDataDir={() => openDataDir()}
+            backups={backups}
+            backupName={backupName}
+            onBackupSelect={setBackupName}
+            onRestoreBackup={restoreFromBackup}
             onDeleteAll={() => removeTasks(active.map((t) => t.id))}
           />
         )}
@@ -943,6 +1004,10 @@ function SettingsPanel(props: {
   onExport: () => void
   onImport: () => void
   onOpenDataDir: () => void
+  backups: BackupEntry[]
+  backupName: string
+  onBackupSelect: (name: string) => void
+  onRestoreBackup: () => void
   onDeleteAll: () => void
 }) {
   const { settings, onChange, onThemeChange } = props
@@ -1085,15 +1150,34 @@ function SettingsPanel(props: {
           <button onClick={props.onExport}>导出备份</button>
           <button onClick={props.onImport}>导入备份</button>
         </div>
-        <p className="muted small">数据保存在 %APPDATA%\Sotto\data.json，每天自动备份 7 份。</p>
+        <p className="muted small">
+          数据保存在 %APPDATA%\Sotto\data.json，每天自动备份 7 份；导入或恢复前会自动保存当前数据。
+        </p>
         <div className="inline-fields">
+          <select
+            className="backup-select"
+            value={props.backupName}
+            onChange={(event) => props.onBackupSelect(event.target.value)}
+          >
+            <option value="">选择备份…</option>
+            {props.backups
+              .filter((backup) => !backup.name.startsWith('corrupt-'))
+              .map((backup) => (
+                <option key={backup.name} value={backup.name}>
+                  {new Date(backup.modified).toLocaleString('zh-CN')} · {backup.name}
+                </option>
+              ))}
+          </select>
+          <button onClick={props.onRestoreBackup} disabled={!props.backupName}>
+            恢复
+          </button>
           <button onClick={props.onOpenDataDir}>打开数据目录</button>
         </div>
       </section>
 
       <section className="settings-section">
         <h3>关于</h3>
-        <p className="muted small">Sotto v2.0.0 · Windows 11 桌面便签</p>
+        <p className="muted small">Sotto v2.2.0 · Windows 11 桌面便签</p>
       </section>
 
       <section className="settings-section danger-zone">

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -152,8 +152,69 @@ impl Default for Data {
 
 struct AppState {
     data: Mutex<Data>,
+    warning: Mutex<Option<String>>,
     dir: PathBuf,
     data_path: PathBuf,
+}
+
+fn prune_prefixed(dir: &Path, prefix: &str, keep: usize) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.file_name()
+                    .map(|name| name.to_string_lossy().starts_with(prefix))
+                    .unwrap_or(false)
+            })
+            .collect();
+        files.sort();
+        if files.len() > keep {
+            for old in &files[..files.len() - keep] {
+                let _ = fs::remove_file(old);
+            }
+        }
+    }
+}
+
+fn move_corrupt_file(dir: &Path, data_path: &Path) -> String {
+    let backups = dir.join("backups");
+    let _ = fs::create_dir_all(&backups);
+    let name = format!("corrupt-{}.json", now_ms());
+    let target = backups.join(&name);
+    if fs::rename(data_path, &target).is_err() {
+        let _ = fs::copy(data_path, &target);
+        let _ = fs::remove_file(data_path);
+    }
+    name
+}
+
+fn load_latest_backup(dir: &Path) -> Option<Data> {
+    let backups = dir.join("backups");
+    let mut files: Vec<(SystemTime, PathBuf)> = fs::read_dir(&backups)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().map(|ext| ext == "json").unwrap_or(false))
+        .filter(|path| {
+            !path
+                .file_name()
+                .map(|name| name.to_string_lossy().starts_with("corrupt-"))
+                .unwrap_or(false)
+        })
+        .filter_map(|path| {
+            let modified = fs::metadata(&path).ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in files {
+        if let Ok(text) = fs::read_to_string(&path) {
+            if let Ok(data) = serde_json::from_str::<Data>(&text) {
+                return Some(data);
+            }
+        }
+    }
+    None
 }
 
 impl AppState {
@@ -164,15 +225,61 @@ impl AppState {
             .join("Sotto");
         let _ = fs::create_dir_all(&dir);
         let data_path = dir.join("data.json");
-        let data = fs::read_to_string(&data_path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Data>(&text).ok())
-            .unwrap_or_default();
-        Self {
+        let mut warning: Option<String> = None;
+
+        let data = match fs::read_to_string(&data_path) {
+            Ok(text) => match serde_json::from_str::<Data>(&text) {
+                Ok(data) => data,
+                Err(err) => {
+                    let corrupt = move_corrupt_file(&dir, &data_path);
+                    match load_latest_backup(&dir) {
+                        Some(restored) => {
+                            warning = Some(format!(
+                                "data.json 无法解析（{err}），已从最近备份恢复。原文件保存为 backups/{corrupt}。"
+                            ));
+                            restored
+                        }
+                        None => {
+                            warning = Some(format!(
+                                "data.json 无法解析（{err}），且没有可用备份，已新建空数据。原文件保存为 backups/{corrupt}。"
+                            ));
+                            Data::default()
+                        }
+                    }
+                }
+            },
+            Err(_) if !data_path.exists() => Data::default(),
+            Err(err) => {
+                warning = Some(format!("读取数据文件失败：{err}"));
+                Data::default()
+            }
+        };
+
+        let state = Self {
             data: Mutex::new(data),
+            warning: Mutex::new(warning),
             dir,
             data_path,
+        };
+        // 从备份恢复后立即写回，避免下次启动又变成空数据。
+        if state.warning.lock().map(|w| w.is_some()).unwrap_or(false) {
+            let snapshot = state.snapshot();
+            let _ = state.save_data(&snapshot);
         }
+        state
+    }
+
+    /// 导入/恢复前留一份当前数据快照，只保留最近 5 份。
+    fn write_snapshot(&self, prefix: &str, data: &Data) {
+        let dir = self.dir.join("backups");
+        if fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let file = dir.join(format!("{prefix}-{}.json", now_ms()));
+        if let Ok(text) = serde_json::to_string_pretty(data) {
+            let _ = fs::write(file, text);
+        }
+        prune_prefixed(&dir, prefix, 5);
     }
 
     fn snapshot(&self) -> Data {
@@ -208,18 +315,7 @@ impl AppState {
         if let Ok(text) = serde_json::to_string_pretty(data) {
             let _ = fs::write(file, text);
         }
-        if let Ok(entries) = fs::read_dir(&backup_dir) {
-            let mut names: Vec<PathBuf> = entries
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
-                .collect();
-            names.sort();
-            if names.len() > 7 {
-                for old in &names[..names.len() - 7] {
-                    let _ = fs::remove_file(old);
-                }
-            }
-        }
+        prune_prefixed(&backup_dir, "day-", 7);
     }
 }
 
@@ -679,11 +775,76 @@ fn import_data(app: tauri::AppHandle) -> Result<bool, String> {
     let parsed: Data = serde_json::from_str(&text).map_err(|e| format!("格式不正确: {e}"))?;
     with_state(&app, |state| {
         let mut data = state.data.lock().map_err(|_| "状态锁失效".to_string())?;
+        // 覆盖前先留一份当前数据，避免导入错误文件后无法挽回。
+        state.write_snapshot("pre-import", &data);
         *data = parsed;
         state.save_data(&data)
     })?;
     notify(&app);
     Ok(true)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupEntry {
+    name: String,
+    modified: u64,
+    size: u64,
+}
+
+#[tauri::command]
+fn list_backups(app: tauri::AppHandle) -> Result<Vec<BackupEntry>, String> {
+    let dir = with_state(&app, |state| state.dir.join("backups"));
+    let mut entries = Vec::new();
+    if let Ok(read) = fs::read_dir(&dir) {
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.extension().map(|ext| ext == "json").unwrap_or(false) {
+                let meta = entry.metadata().ok();
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                let modified = meta
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    entries.push(BackupEntry {
+                        name: name.to_string(),
+                        modified,
+                        size,
+                    });
+                }
+            }
+        }
+    }
+    entries.sort_by(|a, b| b.modified.cmp(&a.modified));
+    Ok(entries)
+}
+
+#[tauri::command]
+fn restore_backup(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    if name.contains('/') || name.contains('\\') || !name.ends_with(".json") {
+        return Err("备份文件名不合法".into());
+    }
+    let dir = with_state(&app, |state| state.dir.join("backups"));
+    let path = dir.join(&name);
+    let text = fs::read_to_string(&path).map_err(|e| format!("读取备份失败: {e}"))?;
+    let parsed: Data = serde_json::from_str(&text).map_err(|e| format!("备份格式不正确: {e}"))?;
+    with_state(&app, |state| {
+        let mut data = state.data.lock().map_err(|_| "状态锁失效".to_string())?;
+        state.write_snapshot("pre-restore", &data);
+        *data = parsed;
+        state.save_data(&data)
+    })?;
+    notify(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn get_startup_warning(app: tauri::AppHandle) -> Option<String> {
+    with_state(&app, |state| {
+        state.warning.lock().ok().and_then(|warning| warning.clone())
+    })
 }
 
 #[tauri::command]
@@ -778,11 +939,57 @@ fn default_widget_position(window: &tauri::WebviewWindow) -> tauri::Result<()> {
     ))
 }
 
+/// 分辨率/缩放变化后把窗口夹回工作区，避免停留在屏幕外。
+fn clamp_to_work_area(window: &tauri::WebviewWindow) {
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        return;
+    };
+    let area = monitor.work_area();
+    let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
+        return;
+    };
+    let max_x = (area.position.x + area.size.width as i32 - size.width as i32).max(area.position.x);
+    let max_y =
+        (area.position.y + area.size.height as i32 - size.height as i32).max(area.position.y);
+    let x = pos.x.clamp(area.position.x, max_x);
+    let y = pos.y.clamp(area.position.y, max_y);
+    if (x, y) != (pos.x, pos.y) {
+        let _ = window.set_position(PhysicalPosition::new(x, y));
+    }
+}
+
+fn clamp_editor_to_work_area(window: &tauri::WebviewWindow) {
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        return;
+    };
+    let area = monitor.work_area();
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+    let width = size.width.min(area.size.width).max(400);
+    let height = size.height.min(area.size.height).max(300);
+    if width != size.width || height != size.height {
+        let _ = window.set_size(PhysicalSize::new(width, height));
+    }
+    clamp_to_work_area(window);
+}
+
 // ---------------------------------------------------------------------- tray
 
 fn show_editor(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("editor") {
         let _ = window.show();
+        clamp_editor_to_work_area(&window);
         let _ = window.set_focus();
     }
 }
@@ -884,10 +1091,21 @@ fn create_windows(app: &tauri::AppHandle) -> tauri::Result<()> {
             let _ = default_widget_position(&widget);
         }
     }
+    // 分辨率或缩放变化后，保存的位置可能落在屏幕外。
+    clamp_to_work_area(&widget);
 
     let widget_handle = app.clone();
     widget.on_window_event(move |event| match event {
         tauri::WindowEvent::Moved(_) => queue_position_save(widget_handle.clone()),
+        tauri::WindowEvent::ScaleFactorChanged { .. } => {
+            let app = widget_handle.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(600));
+                if let Some(window) = app.get_webview_window("main") {
+                    clamp_to_work_area(&window);
+                }
+            });
+        }
         _ => {}
     });
 
@@ -968,6 +1186,9 @@ pub fn run() {
             get_autostart,
             export_data,
             import_data,
+            list_backups,
+            restore_backup,
+            get_startup_warning,
             pick_sound_file,
             open_data_dir,
             quit_app,

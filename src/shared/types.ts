@@ -43,3 +43,9 @@ export interface AppData {
   tomatoes: Tomato[]
   settings: Settings
 }
+
+export interface BackupEntry {
+  name: string
+  modified: number
+  size: number
+}
