@@ -869,40 +869,64 @@ button.danger:hover {
 }
 
 .timeline {
+  margin: 12px 0 10px;
+}
+
+.timeline-bins {
+  display: flex;
+  align-items: center;
+  height: 26px;
+}
+
+.timeline-bin {
+  flex: 1;
   position: relative;
-  margin: 14px 0 18px;
+  height: 100%;
+  border-left: 1px solid #f3eee7;
 }
 
-.timeline-line {
+.timeline-bin:first-child {
+  border-left: none;
+}
+
+.timeline-bin-inner {
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 18px;
-  height: 1px;
-  background: #e2ddd5;
-}
-
-.timeline-tick {
-  position: absolute;
-  bottom: 2px;
-  font-size: 10px;
-  color: #9b948a;
-  transform: translateX(-50%);
-}
-
-.timeline-tick.first {
-  transform: none;
-}
-
-.timeline-tick.last {
-  transform: translateX(-100%);
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  gap: 1px;
+  white-space: nowrap;
 }
 
 .timeline-tomato {
-  position: absolute;
-  transform: translateX(-50%);
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1;
+  cursor: default;
+}
+
+.timeline-axis {
+  position: relative;
+  height: 16px;
+  margin-top: 2px;
+  border-top: 1px solid #e2ddd5;
+}
+
+.axis-label {
+  position: absolute;
+  top: 2px;
+  font-size: 10px;
+  color: #9b948a;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.axis-label.first {
+  transform: none;
+}
+
+.axis-label.last {
+  transform: translateX(-100%);
 }
 
 .col-plot {

@@ -695,25 +695,27 @@ function StatsPanel(props: { tomatoes: Tomato[]; tasks: Task[]; accent: string }
   const dayMax = Math.max(on(today), on(today - DAY_MS), 1)
   const colors = useMemo(() => buildTaskColors(tasks), [tasks])
 
+  // 24h 分成 12 个 2h 区间；同一区间的番茄并列显示。
   const timeline = useMemo(() => {
-    if (!isDay) return { items: [] as { id: string; hour: number; lane: number }[], lanes: 0 }
+    const bins: { id: string; time: string; title: string }[][] = Array.from(
+      { length: 12 },
+      () => [],
+    )
+    if (!isDay) return bins
     const list = tomatoes
       .filter((tomato) => tomato.ts >= dayStart && tomato.ts < dayStart + DAY_MS)
       .sort((a, b) => a.ts - b.ts)
-    const laneEnds: number[] = []
-    const items = list.map((tomato) => {
+    for (const tomato of list) {
       const d = new Date(tomato.ts)
-      const hour = d.getHours() + d.getMinutes() / 60 + d.getSeconds() / 3600
-      let lane = laneEnds.findIndex((end) => hour - end >= 0.4)
-      if (lane === -1) {
-        lane = laneEnds.length
-        laneEnds.push(0)
-      }
-      laneEnds[lane] = hour
-      return { id: tomato.id, hour, lane }
-    })
-    return { items, lanes: laneEnds.length }
-  }, [tomatoes, dayStart, isDay])
+      const bin = Math.min(11, Math.floor(d.getHours() / 2))
+      bins[bin].push({
+        id: tomato.id,
+        time: `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`,
+        title: tasks.find((task) => task.id === tomato.taskId)?.title ?? '已删除任务',
+      })
+    }
+    return bins
+  }, [tomatoes, tasks, dayStart, isDay])
 
   const weekDaySlices = useMemo(() => {
     if (isDay) return [] as TaskSlice[][]
@@ -793,26 +795,35 @@ function StatsPanel(props: { tomatoes: Tomato[]; tasks: Task[]; accent: string }
               </div>
             </div>
 
-            <div className="timeline" style={{ height: 30 + Math.max(timeline.lanes, 1) * 18 }}>
-              <span className="timeline-line" />
-              {[0, 6, 12, 18, 24].map((hour) => (
-                <span
-                  className={`timeline-tick ${hour === 0 ? 'first' : ''} ${hour === 24 ? 'last' : ''}`}
-                  style={{ left: `${(hour / 24) * 100}%` }}
-                  key={hour}
-                >
-                  {hour === 24 ? '24时' : `${hour}时`}
-                </span>
-              ))}
-              {timeline.items.map((item) => (
-                <span
-                  className="timeline-tomato"
-                  key={item.id}
-                  style={{ left: `${(item.hour / 24) * 100}%`, bottom: 24 + item.lane * 18 }}
-                >
-                  🍅
-                </span>
-              ))}
+            <div className="timeline">
+              <div className="timeline-bins">
+                {timeline.map((bin, index) => (
+                  <div className="timeline-bin" key={index}>
+                    <div className="timeline-bin-inner">
+                      {bin.map((item) => (
+                        <span
+                          className="timeline-tomato"
+                          key={item.id}
+                          title={`${item.time} · ${item.title}`}
+                        >
+                          🍅
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="timeline-axis">
+                {[0, 6, 12, 18, 24].map((hour) => (
+                  <span
+                    className={`axis-label ${hour === 0 ? 'first' : ''} ${hour === 24 ? 'last' : ''}`}
+                    style={{ left: `${(hour / 24) * 100}%` }}
+                    key={hour}
+                  >
+                    {hour === 24 ? '24时' : `${hour}时`}
+                  </span>
+                ))}
+              </div>
             </div>
 
             <Breakdown items={daySlices} colors={colors} />
