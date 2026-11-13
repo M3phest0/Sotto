@@ -37,7 +37,7 @@ Windows 11 桌面便签 + 番茄记录。
 ## 备份
 
 - 本地：`E:\share\Claude\Sotto.0.0.2-backup\sotto-2.0-final-20261113.bundle`（git bundle）与 `sotto-2.0-final-src-20261113.zip`（源码）
-- GitHub：未推送。需要确认仓库（现有远端为 `M3phest0/Sotto`）与分支/可见性后执行 `git push -u origin v2.0`。
+- GitHub：已推送到 `M3phest0/Sotto` 的 `v2.0` 分支（`main` 未改动）。
 
 ## 已知限制
 
