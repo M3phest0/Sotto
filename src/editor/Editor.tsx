@@ -596,10 +596,53 @@ function startOfWeek(ts: number) {
   return start.getTime()
 }
 
+function tasksInRange(tomatoes: Tomato[], tasks: Task[], from: number, to: number) {
+  const map = new Map<string, number>()
+  for (const tomato of tomatoes) {
+    if (tomato.ts >= from && tomato.ts < to) {
+      map.set(tomato.taskId, (map.get(tomato.taskId) ?? 0) + 1)
+    }
+  }
+  return [...map.entries()]
+    .map(([taskId, count]) => ({
+      title: tasks.find((task) => task.id === taskId)?.title ?? '已删除任务',
+      count,
+    }))
+    .sort((a, b) => b.count - a.count)
+}
+
+function Breakdown({ items }: { items: { title: string; count: number }[] }) {
+  if (items.length === 0) return <p className="muted small">这个时间段没有番茄。</p>
+  const max = items[0].count
+  return (
+    <div className="breakdown">
+      {items.map((item, index) => {
+        const color = TASK_COLORS[index % TASK_COLORS.length]
+        return (
+          <div className="breakdown-row" key={`${item.title}-${index}`}>
+            <i className="dot task" style={{ background: color }} />
+            <span className="breakdown-title">{item.title}</span>
+            <span className="breakdown-bar">
+              <i style={{ width: `${(item.count / max) * 100}%`, background: color }} />
+            </span>
+            <span className="breakdown-count">{item.count}</span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function StatsPanel(props: { tomatoes: Tomato[]; tasks: Task[]; accent: string }) {
   const { tomatoes, tasks, accent } = props
+  const [daySel, setDaySel] = useState<'today' | 'yesterday'>('today')
+  const [weekSel, setWeekSel] = useState<'this' | 'last'>('this')
+
   const today = startOfDay(Date.now())
-  const weekStart = startOfWeek(Date.now())
+  const yesterday = today - DAY_MS
+  const weekStart = startOfWeek(today)
+  const selectedDay = daySel === 'today' ? today : yesterday
+  const selectedWeekStart = weekSel === 'this' ? weekStart : weekStart - 7 * DAY_MS
 
   const counts = useMemo(() => {
     const map = new Map<number, number>()
@@ -611,108 +654,93 @@ function StatsPanel(props: { tomatoes: Tomato[]; tasks: Task[]; accent: string }
   }, [tomatoes])
 
   const on = (day: number) => counts.get(day) ?? 0
-  const todayCount = on(today)
-  const yesterdayCount = on(today - DAY_MS)
-  const delta = todayCount - yesterdayCount
+  const dayTotal = on(selectedDay)
+  const dayMax = Math.max(on(today), on(yesterday), 1)
 
-  const thisWeek = WEEKDAY_LABELS.map((_, index) => on(weekStart + index * DAY_MS))
-  const lastWeek = WEEKDAY_LABELS.map((_, index) =>
-    on(weekStart - 7 * DAY_MS + index * DAY_MS),
+  const weekDays = WEEKDAY_LABELS.map((_, index) => on(selectedWeekStart + index * DAY_MS))
+  const weekMax = Math.max(...weekDays, 1)
+  const weekTotal = weekDays.reduce((sum, value) => sum + value, 0)
+
+  const dayTasks = useMemo(
+    () => tasksInRange(tomatoes, tasks, selectedDay, selectedDay + DAY_MS),
+    [tomatoes, tasks, selectedDay],
   )
-  const max = Math.max(...thisWeek, ...lastWeek, 1)
-  const thisTotal = thisWeek.reduce((sum, value) => sum + value, 0)
-  const lastTotal = lastWeek.reduce((sum, value) => sum + value, 0)
+  const weekTasks = useMemo(
+    () => tasksInRange(tomatoes, tasks, selectedWeekStart, selectedWeekStart + 7 * DAY_MS),
+    [tomatoes, tasks, selectedWeekStart],
+  )
 
-  const perTask = useMemo(() => {
-    const end = weekStart + 7 * DAY_MS
-    const map = new Map<string, number>()
-    for (const tomato of tomatoes) {
-      if (tomato.ts >= weekStart && tomato.ts < end) {
-        map.set(tomato.taskId, (map.get(tomato.taskId) ?? 0) + 1)
-      }
-    }
-    return [...map.entries()]
-      .map(([taskId, count]) => ({
-        title: tasks.find((task) => task.id === taskId)?.title ?? '已删除任务',
-        count,
-      }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 6)
-  }, [tomatoes, tasks, weekStart])
-
+  const dayLabel = `${new Date(selectedDay).getMonth() + 1}月${new Date(selectedDay).getDate()}日`
   const style = { '--accent': accent } as React.CSSProperties
 
   return (
     <div className="stats" style={style}>
-      <section className="stat-cards">
-        <div className="stat-card">
-          <div className="stat-label">今天</div>
-          <div className="stat-value">{todayCount}</div>
-          <div className="stat-sub">
-            {delta === 0 ? '和昨天一样' : delta > 0 ? `比昨天多 ${delta} 个` : `比昨天少 ${-delta} 个`}
+      <section className="chart-card">
+        <div className="chart-head">
+          <h3>日表 · {dayLabel}</h3>
+          <div className="seg">
+            <button
+              className={daySel === 'today' ? 'active' : ''}
+              onClick={() => setDaySel('today')}
+            >
+              今日
+            </button>
+            <button
+              className={daySel === 'yesterday' ? 'active' : ''}
+              onClick={() => setDaySel('yesterday')}
+            >
+              昨日
+            </button>
           </div>
         </div>
-        <div className="stat-card">
-          <div className="stat-label">昨天</div>
-          <div className="stat-value muted-value">{yesterdayCount}</div>
-          <div className="stat-sub">每天 0 点换日</div>
+        <div className="day-total">
+          <div className="day-number">{dayTotal}</div>
+          <div className="day-bar-wrap">
+            <div className="day-bar" style={{ width: `${(dayTotal / dayMax) * 100}%` }} />
+          </div>
         </div>
+        <Breakdown items={dayTasks} />
       </section>
 
       <section className="chart-card">
         <div className="chart-head">
-          <h3>本周 · 上周</h3>
-          <div className="chart-legend">
-            <span className="legend-item">
-              <i className="dot this" /> 本周 {thisTotal}
-            </span>
-            <span className="legend-item">
-              <i className="dot last" /> 上周 {lastTotal}
-            </span>
+          <h3>周表 · 合计 {weekTotal}</h3>
+          <div className="seg">
+            <button
+              className={weekSel === 'this' ? 'active' : ''}
+              onClick={() => setWeekSel('this')}
+            >
+              本周
+            </button>
+            <button
+              className={weekSel === 'last' ? 'active' : ''}
+              onClick={() => setWeekSel('last')}
+            >
+              上周
+            </button>
           </div>
         </div>
         <div className="chart">
           {WEEKDAY_LABELS.map((label, index) => {
-            const isToday = weekStart + index * DAY_MS === today
+            const isToday = selectedWeekStart + index * DAY_MS === today
+            const value = weekDays[index]
             return (
               <div className={`chart-col ${isToday ? 'today' : ''}`} key={label}>
                 <div className="bars">
                   <div
                     className="bar this"
-                    style={{ height: `${(thisWeek[index] / max) * 100}%` }}
-                    title={`本周${label}：${thisWeek[index]} 个`}
+                    style={{ height: `${(value / weekMax) * 100}%` }}
+                    title={`${label}：${value} 个`}
                   >
-                    {thisWeek[index] > 0 && <span>{thisWeek[index]}</span>}
+                    {value > 0 && <span>{value}</span>}
                   </div>
-                  <div
-                    className="bar last"
-                    style={{ height: `${(lastWeek[index] / max) * 100}%` }}
-                    title={`上周${label}：${lastWeek[index]} 个`}
-                  />
                 </div>
                 <div className="chart-day">{label}</div>
               </div>
             )
           })}
         </div>
-        {tomatoes.length === 0 && <p className="muted small">还没有番茄记录，贴一个试试。</p>}
-      </section>
-
-      <section className="chart-card">
-        <div className="chart-head">
-          <h3>本周投入</h3>
-          <span className="muted small">按任务</span>
-        </div>
-        {perTask.length === 0 && <p className="muted small">本周还没有番茄。</p>}
-        <div className="breakdown">
-          {perTask.map((item, index) => (
-            <div className="breakdown-row" key={item.title + index}>
-              <i className="dot task" style={{ background: TASK_COLORS[index % TASK_COLORS.length] }} />
-              <span className="breakdown-title">{item.title}</span>
-              <span className="breakdown-count">{item.count}</span>
-            </div>
-          ))}
-        </div>
+        <Breakdown items={weekTasks} />
       </section>
     </div>
   )
