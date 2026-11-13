@@ -10,6 +10,7 @@ import {
   onFocusTask,
   onOpenView,
   onStateChanged,
+  openDataDir,
   pickSoundFile,
   saveSettings,
   saveTask,
@@ -414,6 +415,7 @@ export function Editor() {
                 .then((ok) => ok && showToast('导入完成'))
                 .catch(() => showToast('导入失败'))
             }
+            onOpenDataDir={() => openDataDir()}
             onDeleteAll={() => removeTasks(active.map((t) => t.id))}
           />
         )}
@@ -580,6 +582,7 @@ function SettingsPanel(props: {
   onAutostart: (enabled: boolean) => void
   onExport: () => void
   onImport: () => void
+  onOpenDataDir: () => void
   onDeleteAll: () => void
 }) {
   const { settings, onChange, onThemeChange } = props
@@ -723,6 +726,14 @@ function SettingsPanel(props: {
           <button onClick={props.onImport}>导入备份</button>
         </div>
         <p className="muted small">数据保存在 %APPDATA%\Sotto\data.json，每天自动备份 7 份。</p>
+        <div className="inline-fields">
+          <button onClick={props.onOpenDataDir}>打开数据目录</button>
+        </div>
+      </section>
+
+      <section className="settings-section">
+        <h3>关于</h3>
+        <p className="muted small">Sotto v2.0.0 · Windows 11 桌面便签</p>
       </section>
 
       <section className="settings-section danger-zone">

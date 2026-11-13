@@ -687,6 +687,16 @@ fn import_data(app: tauri::AppHandle) -> Result<bool, String> {
 }
 
 #[tauri::command]
+fn open_data_dir(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = with_state(&app, |s| s.dir.clone());
+    std::process::Command::new("explorer")
+        .arg(dir)
+        .spawn()
+        .map_err(|e| format!("打开目录失败: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("editor") {
         save_editor_bounds(&app, &window);
@@ -959,6 +969,7 @@ pub fn run() {
             export_data,
             import_data,
             pick_sound_file,
+            open_data_dir,
             quit_app,
         ])
         .setup(|app| {
@@ -967,9 +978,11 @@ pub fn run() {
             let settings = state.snapshot().settings;
             app.manage(state);
 
-            // 首次运行默认开启自启。
-            if settings.autostart && !autostart_registered() {
-                let _ = apply_autostart(true);
+            // 开启自启时每次启动都校正注册表路径（避免旧版本或移动后的路径残留）。
+            if settings.autostart {
+                if let Err(err) = apply_autostart(true) {
+                    eprintln!("sotto autostart reconcile failed: {err}");
+                }
             }
 
             create_tray(&handle)?;

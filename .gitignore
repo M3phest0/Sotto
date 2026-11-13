@@ -7,3 +7,5 @@ dev.log
 .cache/
 scripts/*.png
 tests/tmp/
+release/
+build.log
