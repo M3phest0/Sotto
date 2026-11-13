@@ -1378,7 +1378,7 @@ function SettingsPanel(props: {
 
       <section className="settings-section">
         <h3>关于</h3>
-        <p className="muted small">Sotto v2.2.0 · Windows 11 桌面便签</p>
+        <p className="muted small">Sotto v2.3.0 · Windows 11 桌面便签</p>
       </section>
 
       <section className="settings-section danger-zone">
