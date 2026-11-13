@@ -596,7 +596,15 @@ function startOfWeek(ts: number) {
   return start.getTime()
 }
 
-function tasksInRange(tomatoes: Tomato[], tasks: Task[], from: number, to: number) {
+interface TaskSlice {
+  taskId: string
+  title: string
+  count: number
+}
+
+type Period = 'today' | 'yesterday' | 'thisWeek' | 'lastWeek'
+
+function sliceTasks(tomatoes: Tomato[], tasks: Task[], from: number, to: number): TaskSlice[] {
   const map = new Map<string, number>()
   for (const tomato of tomatoes) {
     if (tomato.ts >= from && tomato.ts < to) {
@@ -605,44 +613,68 @@ function tasksInRange(tomatoes: Tomato[], tasks: Task[], from: number, to: numbe
   }
   return [...map.entries()]
     .map(([taskId, count]) => ({
+      taskId,
       title: tasks.find((task) => task.id === taskId)?.title ?? '已删除任务',
       count,
     }))
-    .sort((a, b) => b.count - a.count)
+    .sort((a, b) => b.count - a.count || a.title.localeCompare(b.title))
 }
 
-function Breakdown({ items }: { items: { title: string; count: number }[] }) {
+function hoursText(count: number) {
+  const hours = count * 0.5
+  return `${Number.isInteger(hours) ? hours : hours.toFixed(1)} 小时`
+}
+
+function dateLabel(ts: number) {
+  const d = new Date(ts)
+  return `${d.getMonth() + 1}月${d.getDate()}日`
+}
+
+/// 同一任务在所有时间段使用同一颜色：按任务在列表里的顺序固定分配。
+function buildTaskColors(tasks: Task[]) {
+  const map = new Map<string, string>()
+  const sorted = [...tasks].sort((a, b) => a.order - b.order)
+  sorted.forEach((task, index) => {
+    map.set(task.id, TASK_COLORS[index % TASK_COLORS.length])
+  })
+  return map
+}
+
+function Breakdown({ items, colors }: { items: TaskSlice[]; colors: Map<string, string> }) {
   if (items.length === 0) return <p className="muted small">这个时间段没有番茄。</p>
   const max = items[0].count
   return (
     <div className="breakdown">
-      {items.map((item, index) => {
-        const color = TASK_COLORS[index % TASK_COLORS.length]
-        return (
-          <div className="breakdown-row" key={`${item.title}-${index}`}>
-            <i className="dot task" style={{ background: color }} />
-            <span className="breakdown-title">{item.title}</span>
-            <span className="breakdown-bar">
-              <i style={{ width: `${(item.count / max) * 100}%`, background: color }} />
-            </span>
-            <span className="breakdown-count">{item.count}</span>
-          </div>
-        )
-      })}
+      {items.map((item) => (
+        <div className="breakdown-row" key={item.taskId}>
+          <i className="dot task" style={{ background: colors.get(item.taskId) }} />
+          <span className="breakdown-title">{item.title}</span>
+          <span className="breakdown-bar">
+            <i
+              style={{
+                width: `${(item.count / max) * 100}%`,
+                background: colors.get(item.taskId),
+              }}
+            />
+          </span>
+          <span className="breakdown-count" title={`${item.count} 个番茄`}>
+            {hoursText(item.count)}
+          </span>
+        </div>
+      ))}
     </div>
   )
 }
 
 function StatsPanel(props: { tomatoes: Tomato[]; tasks: Task[]; accent: string }) {
   const { tomatoes, tasks, accent } = props
-  const [daySel, setDaySel] = useState<'today' | 'yesterday'>('today')
-  const [weekSel, setWeekSel] = useState<'this' | 'last'>('this')
+  const [period, setPeriod] = useState<Period>('today')
 
   const today = startOfDay(Date.now())
-  const yesterday = today - DAY_MS
   const weekStart = startOfWeek(today)
-  const selectedDay = daySel === 'today' ? today : yesterday
-  const selectedWeekStart = weekSel === 'this' ? weekStart : weekStart - 7 * DAY_MS
+  const isDay = period === 'today' || period === 'yesterday'
+  const dayStart = period === 'yesterday' ? today - DAY_MS : today
+  const weekBase = period === 'lastWeek' ? weekStart - 7 * DAY_MS : weekStart
 
   const counts = useMemo(() => {
     const map = new Map<number, number>()
@@ -654,93 +686,167 @@ function StatsPanel(props: { tomatoes: Tomato[]; tasks: Task[]; accent: string }
   }, [tomatoes])
 
   const on = (day: number) => counts.get(day) ?? 0
-  const dayTotal = on(selectedDay)
-  const dayMax = Math.max(on(today), on(yesterday), 1)
 
-  const weekDays = WEEKDAY_LABELS.map((_, index) => on(selectedWeekStart + index * DAY_MS))
-  const weekMax = Math.max(...weekDays, 1)
-  const weekTotal = weekDays.reduce((sum, value) => sum + value, 0)
-
-  const dayTasks = useMemo(
-    () => tasksInRange(tomatoes, tasks, selectedDay, selectedDay + DAY_MS),
-    [tomatoes, tasks, selectedDay],
+  const daySlices = useMemo(
+    () => (isDay ? sliceTasks(tomatoes, tasks, dayStart, dayStart + DAY_MS) : []),
+    [tomatoes, tasks, isDay, dayStart],
   )
-  const weekTasks = useMemo(
-    () => tasksInRange(tomatoes, tasks, selectedWeekStart, selectedWeekStart + 7 * DAY_MS),
-    [tomatoes, tasks, selectedWeekStart],
-  )
+  const dayTotal = daySlices.reduce((sum, item) => sum + item.count, 0)
+  const dayMax = Math.max(on(today), on(today - DAY_MS), 1)
+  const colors = useMemo(() => buildTaskColors(tasks), [tasks])
 
-  const dayLabel = `${new Date(selectedDay).getMonth() + 1}月${new Date(selectedDay).getDate()}日`
+  const timeline = useMemo(() => {
+    if (!isDay) return { items: [] as { id: string; hour: number; lane: number }[], lanes: 0 }
+    const list = tomatoes
+      .filter((tomato) => tomato.ts >= dayStart && tomato.ts < dayStart + DAY_MS)
+      .sort((a, b) => a.ts - b.ts)
+    const laneEnds: number[] = []
+    const items = list.map((tomato) => {
+      const d = new Date(tomato.ts)
+      const hour = d.getHours() + d.getMinutes() / 60 + d.getSeconds() / 3600
+      let lane = laneEnds.findIndex((end) => hour - end >= 0.4)
+      if (lane === -1) {
+        lane = laneEnds.length
+        laneEnds.push(0)
+      }
+      laneEnds[lane] = hour
+      return { id: tomato.id, hour, lane }
+    })
+    return { items, lanes: laneEnds.length }
+  }, [tomatoes, dayStart, isDay])
+
+  const weekDaySlices = useMemo(() => {
+    if (isDay) return [] as TaskSlice[][]
+    return WEEKDAY_LABELS.map((_, index) => {
+      const from = weekBase + index * DAY_MS
+      return sliceTasks(tomatoes, tasks, from, from + DAY_MS)
+    })
+  }, [tomatoes, tasks, weekBase, isDay])
+  const weekTotals = weekDaySlices.map((slices) =>
+    slices.reduce((sum, item) => sum + item.count, 0),
+  )
+  const weekMax = Math.max(...weekTotals, 1)
+  const weekSlices = useMemo(
+    () => (isDay ? [] : sliceTasks(tomatoes, tasks, weekBase, weekBase + 7 * DAY_MS)),
+    [tomatoes, tasks, weekBase, isDay],
+  )
   const style = { '--accent': accent } as React.CSSProperties
 
   return (
     <div className="stats" style={style}>
       <section className="chart-card">
         <div className="chart-head">
-          <h3>日表 · {dayLabel}</h3>
-          <div className="seg">
-            <button
-              className={daySel === 'today' ? 'active' : ''}
-              onClick={() => setDaySel('today')}
-            >
-              今日
-            </button>
-            <button
-              className={daySel === 'yesterday' ? 'active' : ''}
-              onClick={() => setDaySel('yesterday')}
-            >
-              昨日
-            </button>
+          <h3>
+            {isDay
+              ? `日表 · ${dateLabel(dayStart)}`
+              : `周表 · ${dateLabel(weekBase)}–${dateLabel(weekBase + 6 * DAY_MS)}`}
+          </h3>
+          <div className="seg-group">
+            <div className="seg">
+              <button
+                className={period === 'today' ? 'active' : ''}
+                onClick={() => setPeriod('today')}
+              >
+                今天
+              </button>
+              <button
+                className={period === 'yesterday' ? 'active' : ''}
+                onClick={() => setPeriod('yesterday')}
+              >
+                昨天
+              </button>
+            </div>
+            <div className="seg">
+              <button
+                className={period === 'thisWeek' ? 'active' : ''}
+                onClick={() => setPeriod('thisWeek')}
+              >
+                本周
+              </button>
+              <button
+                className={period === 'lastWeek' ? 'active' : ''}
+                onClick={() => setPeriod('lastWeek')}
+              >
+                上周
+              </button>
+            </div>
           </div>
         </div>
-        <div className="day-total">
-          <div className="day-number">{dayTotal}</div>
-          <div className="day-bar-wrap">
-            <div className="day-bar" style={{ width: `${(dayTotal / dayMax) * 100}%` }} />
-          </div>
-        </div>
-        <Breakdown items={dayTasks} />
-      </section>
 
-      <section className="chart-card">
-        <div className="chart-head">
-          <h3>周表 · 合计 {weekTotal}</h3>
-          <div className="seg">
-            <button
-              className={weekSel === 'this' ? 'active' : ''}
-              onClick={() => setWeekSel('this')}
-            >
-              本周
-            </button>
-            <button
-              className={weekSel === 'last' ? 'active' : ''}
-              onClick={() => setWeekSel('last')}
-            >
-              上周
-            </button>
-          </div>
-        </div>
-        <div className="chart">
-          {WEEKDAY_LABELS.map((label, index) => {
-            const isToday = selectedWeekStart + index * DAY_MS === today
-            const value = weekDays[index]
-            return (
-              <div className={`chart-col ${isToday ? 'today' : ''}`} key={label}>
-                <div className="bars">
-                  <div
-                    className="bar this"
-                    style={{ height: `${(value / weekMax) * 100}%` }}
-                    title={`${label}：${value} 个`}
-                  >
-                    {value > 0 && <span>{value}</span>}
-                  </div>
-                </div>
-                <div className="chart-day">{label}</div>
+        {isDay ? (
+          <>
+            <div className="day-summary">
+              <span className="day-number">
+                {dayTotal}
+                <em>个</em>
+              </span>
+              <span className="day-hours">{hoursText(dayTotal)}</span>
+            </div>
+            <div className="stack-track">
+              <div className="stack" style={{ width: `${(dayTotal / dayMax) * 100}%` }}>
+                {daySlices.map((item) => (
+                  <i
+                    key={item.taskId}
+                    style={{ flexGrow: item.count, background: colors.get(item.taskId) }}
+                  />
+                ))}
               </div>
-            )
-          })}
-        </div>
-        <Breakdown items={weekTasks} />
+            </div>
+
+            <div className="timeline" style={{ height: 30 + Math.max(timeline.lanes, 1) * 18 }}>
+              <span className="timeline-line" />
+              {[0, 6, 12, 18, 24].map((hour) => (
+                <span
+                  className={`timeline-tick ${hour === 0 ? 'first' : ''} ${hour === 24 ? 'last' : ''}`}
+                  style={{ left: `${(hour / 24) * 100}%` }}
+                  key={hour}
+                >
+                  {hour === 24 ? '24时' : `${hour}时`}
+                </span>
+              ))}
+              {timeline.items.map((item) => (
+                <span
+                  className="timeline-tomato"
+                  key={item.id}
+                  style={{ left: `${(item.hour / 24) * 100}%`, bottom: 24 + item.lane * 18 }}
+                >
+                  🍅
+                </span>
+              ))}
+            </div>
+
+            <Breakdown items={daySlices} colors={colors} />
+          </>
+        ) : (
+          <>
+            <div className="chart">
+              {WEEKDAY_LABELS.map((label, index) => {
+                const total = weekTotals[index]
+                const isToday = weekBase + index * DAY_MS === today
+                return (
+                  <div className={`chart-col ${isToday ? 'today' : ''}`} key={label}>
+                    <div className="col-plot">
+                      {total > 0 && <span className="bar-hours">{total * 0.5}h</span>}
+                      <div className="bar-stack" style={{ height: `${(total / weekMax) * 100}%` }}>
+                        {weekDaySlices[index].map((item) => (
+                          <i
+                            key={item.taskId}
+                            style={{
+                              flexGrow: item.count,
+                              background: colors.get(item.taskId),
+                            }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                    <div className="chart-day">{label}</div>
+                  </div>
+                )
+              })}
+            </div>
+            <Breakdown items={weekSlices} colors={colors} />
+          </>
+        )}
       </section>
     </div>
   )

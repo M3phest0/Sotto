@@ -1,0 +1,125 @@
+
+/* 统计页 v2：合并日/周视图 */
+
+.seg-group {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.day-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin: 4px 0 10px;
+}
+
+.day-number {
+  font-size: 38px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--accent, #e8563f);
+  font-variant-numeric: tabular-nums;
+  min-width: 0;
+}
+
+.day-number em {
+  font-style: normal;
+  font-size: 14px;
+  color: #9b948a;
+  margin-left: 3px;
+  font-weight: 500;
+}
+
+.day-hours {
+  font-size: 13px;
+  color: #6c665e;
+}
+
+.stack-track {
+  height: 14px;
+  border-radius: 7px;
+  background: #f2ede6;
+  overflow: hidden;
+}
+
+.stack {
+  height: 100%;
+  display: flex;
+  border-radius: 7px;
+  overflow: hidden;
+  transition: width 200ms ease;
+}
+
+.stack i {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+}
+
+.timeline {
+  position: relative;
+  margin: 14px 0 18px;
+}
+
+.timeline-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 18px;
+  height: 1px;
+  background: #e2ddd5;
+}
+
+.timeline-tick {
+  position: absolute;
+  bottom: 2px;
+  font-size: 10px;
+  color: #9b948a;
+  transform: translateX(-50%);
+}
+
+.timeline-tick.first {
+  transform: none;
+}
+
+.timeline-tick.last {
+  transform: translateX(-100%);
+}
+
+.timeline-tomato {
+  position: absolute;
+  transform: translateX(-50%);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.col-plot {
+  flex: 1;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 4px;
+}
+
+.bar-hours {
+  font-size: 10px;
+  color: #9b948a;
+}
+
+.bar-stack {
+  width: 26px;
+  display: flex;
+  flex-direction: column-reverse;
+  border-radius: 5px 5px 2px 2px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.bar-stack i {
+  display: block;
+  width: 100%;
+  min-height: 0;
+}
