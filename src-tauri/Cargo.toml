@@ -1,0 +1,32 @@
+[package]
+name = "sotto"
+version = "0.2.0"
+description = "Sotto — Windows 11 desktop sticky-note widget"
+edition = "2021"
+rust-version = "1.82"
+
+[lib]
+name = "sotto_lib"
+# windows-gnu + rust-lld 下 cdylib 会因导出符号超限失败；桌面只需要 rlib。
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+rfd = "0.15"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
