@@ -21,10 +21,10 @@ import {
   undoTomato,
 } from '../shared/api'
 import { playTomato } from '../shared/sound'
-import type { AppData, Settings, Task } from '../shared/types'
+import type { AppData, Settings, Task, Tomato } from '../shared/types'
 import './editor.css'
 
-type View = 'tasks' | 'settings'
+type View = 'tasks' | 'stats' | 'settings'
 
 const EMPTY_SETTINGS: Settings = {
   theme: { bg: '#FFF9F2', text: '#2A2622', accent: '#E8563F' },
@@ -46,6 +46,7 @@ const EMPTY_SETTINGS: Settings = {
 export function Editor() {
   const [view, setView] = useState<View>('tasks')
   const [tasks, setTasks] = useState<Task[]>([])
+  const [tomatoes, setTomatoes] = useState<Tomato[]>([])
   const [tomatoCounts, setTomatoCounts] = useState<Record<string, number>>({})
   const [settings, setSettings] = useState<Settings>(EMPTY_SETTINGS)
   const [selected, setSelected] = useState<string | null>(null)
@@ -60,6 +61,7 @@ export function Editor() {
 
   const applyData = useCallback((data: AppData) => {
     setTasks(data.tasks)
+    setTomatoes(data.tomatoes)
     setSettings((prev) => (prev === EMPTY_SETTINGS ? data.settings : prev))
     const counts: Record<string, number> = {}
     for (const tomato of data.tomatoes) {
@@ -297,6 +299,12 @@ export function Editor() {
             任务
           </button>
           <button
+            className={`tab ${view === 'stats' ? 'active' : ''}`}
+            onClick={() => setView('stats')}
+          >
+            统计
+          </button>
+          <button
             className={`tab ${view === 'settings' ? 'active' : ''}`}
             onClick={() => setView('settings')}
           >
@@ -351,6 +359,13 @@ export function Editor() {
             </div>
           </>
         )}
+        {view === 'stats' && (
+          <div className="settings-hint">
+            <div className="section-label">统计</div>
+            <p>今天和昨天的对比，以及本周与上周的每日番茄。</p>
+            <p className="muted">每天 0 点换日，数据来自每一次贴番茄。</p>
+          </div>
+        )}
         {view === 'settings' && <SettingsList />}
       </aside>
 
@@ -378,6 +393,9 @@ export function Editor() {
               ↑ ↓ 切换 · Shift ↑↓ 多选 · Delete 删除 · F2 改标题
             </p>
           </div>
+        )}
+        {view === 'stats' && (
+          <StatsPanel tomatoes={tomatoes} tasks={tasks} accent={settings.theme.accent} />
         )}
         {view === 'settings' && (
           <SettingsPanel
@@ -557,6 +575,145 @@ function TaskDetail(props: {
           删除任务
         </button>
       </div>
+    </div>
+  )
+}
+
+const DAY_MS = 86_400_000
+const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六', '日']
+const TASK_COLORS = ['#E8563F', '#E9A23B', '#6FA65B', '#5B8AC7', '#9B6BB5', '#C96F8E']
+
+function startOfDay(ts: number) {
+  const d = new Date(ts)
+  d.setHours(0, 0, 0, 0)
+  return d.getTime()
+}
+
+function startOfWeek(ts: number) {
+  const start = new Date(startOfDay(ts))
+  const offset = (start.getDay() + 6) % 7 // 周一为一周起点
+  start.setDate(start.getDate() - offset)
+  return start.getTime()
+}
+
+function StatsPanel(props: { tomatoes: Tomato[]; tasks: Task[]; accent: string }) {
+  const { tomatoes, tasks, accent } = props
+  const today = startOfDay(Date.now())
+  const weekStart = startOfWeek(Date.now())
+
+  const counts = useMemo(() => {
+    const map = new Map<number, number>()
+    for (const tomato of tomatoes) {
+      const day = startOfDay(tomato.ts)
+      map.set(day, (map.get(day) ?? 0) + 1)
+    }
+    return map
+  }, [tomatoes])
+
+  const on = (day: number) => counts.get(day) ?? 0
+  const todayCount = on(today)
+  const yesterdayCount = on(today - DAY_MS)
+  const delta = todayCount - yesterdayCount
+
+  const thisWeek = WEEKDAY_LABELS.map((_, index) => on(weekStart + index * DAY_MS))
+  const lastWeek = WEEKDAY_LABELS.map((_, index) =>
+    on(weekStart - 7 * DAY_MS + index * DAY_MS),
+  )
+  const max = Math.max(...thisWeek, ...lastWeek, 1)
+  const thisTotal = thisWeek.reduce((sum, value) => sum + value, 0)
+  const lastTotal = lastWeek.reduce((sum, value) => sum + value, 0)
+
+  const perTask = useMemo(() => {
+    const end = weekStart + 7 * DAY_MS
+    const map = new Map<string, number>()
+    for (const tomato of tomatoes) {
+      if (tomato.ts >= weekStart && tomato.ts < end) {
+        map.set(tomato.taskId, (map.get(tomato.taskId) ?? 0) + 1)
+      }
+    }
+    return [...map.entries()]
+      .map(([taskId, count]) => ({
+        title: tasks.find((task) => task.id === taskId)?.title ?? '已删除任务',
+        count,
+      }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 6)
+  }, [tomatoes, tasks, weekStart])
+
+  const style = { '--accent': accent } as React.CSSProperties
+
+  return (
+    <div className="stats" style={style}>
+      <section className="stat-cards">
+        <div className="stat-card">
+          <div className="stat-label">今天</div>
+          <div className="stat-value">{todayCount}</div>
+          <div className="stat-sub">
+            {delta === 0 ? '和昨天一样' : delta > 0 ? `比昨天多 ${delta} 个` : `比昨天少 ${-delta} 个`}
+          </div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">昨天</div>
+          <div className="stat-value muted-value">{yesterdayCount}</div>
+          <div className="stat-sub">每天 0 点换日</div>
+        </div>
+      </section>
+
+      <section className="chart-card">
+        <div className="chart-head">
+          <h3>本周 · 上周</h3>
+          <div className="chart-legend">
+            <span className="legend-item">
+              <i className="dot this" /> 本周 {thisTotal}
+            </span>
+            <span className="legend-item">
+              <i className="dot last" /> 上周 {lastTotal}
+            </span>
+          </div>
+        </div>
+        <div className="chart">
+          {WEEKDAY_LABELS.map((label, index) => {
+            const isToday = weekStart + index * DAY_MS === today
+            return (
+              <div className={`chart-col ${isToday ? 'today' : ''}`} key={label}>
+                <div className="bars">
+                  <div
+                    className="bar this"
+                    style={{ height: `${(thisWeek[index] / max) * 100}%` }}
+                    title={`本周${label}：${thisWeek[index]} 个`}
+                  >
+                    {thisWeek[index] > 0 && <span>{thisWeek[index]}</span>}
+                  </div>
+                  <div
+                    className="bar last"
+                    style={{ height: `${(lastWeek[index] / max) * 100}%` }}
+                    title={`上周${label}：${lastWeek[index]} 个`}
+                  />
+                </div>
+                <div className="chart-day">{label}</div>
+              </div>
+            )
+          })}
+        </div>
+        {tomatoes.length === 0 && <p className="muted small">还没有番茄记录，贴一个试试。</p>}
+      </section>
+
+      <section className="chart-card">
+        <div className="chart-head">
+          <h3>本周投入</h3>
+          <span className="muted small">按任务</span>
+        </div>
+        {perTask.length === 0 && <p className="muted small">本周还没有番茄。</p>}
+        <div className="breakdown">
+          {perTask.map((item, index) => (
+            <div className="breakdown-row" key={item.title + index}>
+              <i className="dot task" style={{ background: TASK_COLORS[index % TASK_COLORS.length] }} />
+              <span className="breakdown-title">{item.title}</span>
+              <span className="breakdown-count">{item.count}</span>
+            </div>
+          ))}
+        </div>
+      </section>
     </div>
   )
 }

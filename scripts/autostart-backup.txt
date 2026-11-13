@@ -1,0 +1,1 @@
+﻿"E:\share\Claude\Win11桌面便签组件\src-tauri\target\release\sotto.exe" --autostart
