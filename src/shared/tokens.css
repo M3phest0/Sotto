@@ -1,0 +1,65 @@
+/*
+ * Design tokens — 暖色纸张风格。
+ * 只承载跨界面复用的颜色、圆角、阴影和字体；
+ * 便签的 --bg / --text / --accent 仍由设置里的主题注入，不在这里定义。
+ */
+
+:root {
+  /* 字体 */
+  --font-ui: 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif;
+
+  /* 画布与表面 */
+  --color-bg: #f6f4f1;
+  --color-surface: #fffdfa;
+  --color-surface-sunken: #efece7;
+  --color-surface-hover: #e9e4dc;
+  --color-surface-tab: #e6e1d9;
+  --color-surface-track: #f2ede6;
+  --color-surface-warm: #fff4ee;
+  --color-white: #fff;
+
+  /* 文字 */
+  --color-text: #2a2622;
+  --color-text-soft: #4a443d;
+  --color-text-secondary: #6c665e;
+  --color-text-muted: #8a837b;
+  --color-text-quiet: #9b948a;
+  --color-text-ghost: #a49d93;
+
+  /* 描边 */
+  --color-border: #e2ddd5;
+  --color-border-soft: #e7e1d7;
+  --color-border-input: #ded7cc;
+  --color-border-strong: #c9c2b8;
+  --color-border-selected: #ddd6cb;
+  --color-border-divider: #eae4da;
+  --color-border-chart: #ece6dc;
+  --color-border-timeline: #f3eee7;
+  --color-scrollbar: #d3ccc1;
+
+  /* 强调色与状态色 */
+  --color-accent: #e8563f;
+  --color-accent-hover: #d94b35;
+  --color-accent-soft: #efc3ba;
+  --color-accent-border: #f3ddd5;
+  --color-danger: #c0392b;
+  --color-danger-border: #eccac3;
+  --color-danger-tint: #fdf0ed;
+  --color-warning-text: #8a3b2e;
+  --color-success: #7ba86b;
+  --color-overdue: #d6453d;
+  --color-check-border: #c3bbaf;
+
+  /* 圆角 */
+  --radius-2xs: 3px;
+  --radius-xs: 4px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-2xl: 18px;
+  --radius-pill: 999px;
+
+  /* 阴影 */
+  --shadow-control: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-toast: 0 8px 24px rgba(0, 0, 0, 0.18);
+}

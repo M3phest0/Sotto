@@ -23,7 +23,8 @@ import {
   setWidgetSize,
   undoTomato,
 } from '../shared/api'
-import { playTomato } from '../shared/sound'
+import { playComplete, playTomato } from '../shared/sound'
+import { doneSeedStyle, makeDoneSeeds } from '../shared/doneSeeds'
 import type { AppData, BackupEntry, Settings, Task, Tomato } from '../shared/types'
 import './editor.css'
 
@@ -51,6 +52,28 @@ const EMPTY_SETTINGS: Settings = {
   editorHeight: null,
 }
 
+/** 把 DDL 转成本地时间戳；无 DDL 或格式非法返回 null。 */
+function ddlTime(ddl: string | null): number | null {
+  if (!ddl) return null
+  const [datePart, timePart = '00:00'] = ddl.split('T')
+  const [year, month, day] = datePart.split('-').map(Number)
+  const [hour, minute] = timePart.split(':').map(Number)
+  const value = new Date(year, month - 1, day, hour || 0, minute || 0).getTime()
+  return Number.isNaN(value) ? null : value
+}
+
+type DragOver = { id: string; after: boolean }
+
+/** 过期在前，越早到期越靠前；无 DDL 沉底；同一时间按手动顺序。 */
+function compareByDdl(a: Task, b: Task) {
+  const aTime = ddlTime(a.ddl)
+  const bTime = ddlTime(b.ddl)
+  if (aTime === null && bTime === null) return a.order - b.order
+  if (aTime === null) return 1
+  if (bTime === null) return -1
+  return aTime - bTime || a.order - b.order
+}
+
 export function Editor() {
   const [view, setView] = useState<View>('tasks')
   const [tasks, setTasks] = useState<Task[]>([])
@@ -63,12 +86,16 @@ export function Editor() {
   const [loading, setLoading] = useState(true)
   const [toast, setToast] = useState('')
   const [dragId, setDragId] = useState<string | null>(null)
+  const [dragOver, setDragOver] = useState<DragOver | null>(null)
+  const [completing, setCompleting] = useState<Record<string, number>>({})
+  const [completedPulse, setCompletedPulse] = useState(0)
   const [backups, setBackups] = useState<BackupEntry[]>([])
   const [backupName, setBackupName] = useState('')
   const [startupWarning, setStartupWarning] = useState<string | null>(null)
   const titleRef = useRef<HTMLInputElement>(null)
   const draftTimer = useRef<number | null>(null)
   const toastTimer = useRef<number | null>(null)
+  const completeTimers = useRef<Record<string, number>>({})
 
   const applyData = useCallback((data: AppData) => {
     setTasks(data.tasks)
@@ -248,7 +275,24 @@ export function Editor() {
   }
 
   const toggleDone = (task: Task) => {
-    setDone(task.id, !task.completedAt).catch(() => showToast('操作失败'))
+    if (task.completedAt) {
+      setDone(task.id, false).catch(() => showToast('操作失败'))
+      return
+    }
+    if (completeTimers.current[task.id] !== undefined) return
+    playComplete(settings)
+    setCompleting((prev) => ({ ...prev, [task.id]: performance.now() }))
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    completeTimers.current[task.id] = window.setTimeout(() => {
+      delete completeTimers.current[task.id]
+      setDone(task.id, true).catch(() => showToast('操作失败'))
+      setCompleting((prev) => {
+        const next = { ...prev }
+        delete next[task.id]
+        return next
+      })
+      setCompletedPulse((value) => value + 1)
+    }, reduced ? 0 : 800)
   }
 
   const selectRow = (task: Task, event: React.MouseEvent) => {
@@ -347,21 +391,114 @@ export function Editor() {
     return () => window.removeEventListener('keydown', onKey)
   })
 
-  // 拖动排序。
-  const dropOn = (target: Task) => {
-    if (!dragId || dragId === target.id) return
-    const list = [...active]
-    const from = list.findIndex((t) => t.id === dragId)
-    const to = list.findIndex((t) => t.id === target.id)
-    if (from < 0 || to < 0) return
+  // 指针拖拽排序：不依赖 HTML5 拖放，WebView2 里更可靠。
+  const activeRef = useRef<Task[]>(active)
+  activeRef.current = active
+
+  const moveTask = useCallback((fromId: string, toId: string, after: boolean) => {
+    const list = [...activeRef.current]
+    const from = list.findIndex((t) => t.id === fromId)
+    if (from < 0) return
     const [moved] = list.splice(from, 1)
+    let to = list.findIndex((t) => t.id === toId)
+    if (to < 0) return
+    if (after) to += 1
     list.splice(to, 0, moved)
     list.forEach((task, index) => {
       if (task.order !== index + 1) {
         saveTask({ ...task, order: index + 1 }).catch(() => {})
       }
     })
-    setDragId(null)
+  }, [])
+
+  const dragState = useRef<{ id: string; x: number; y: number; active: boolean } | null>(null)
+  const dragOverRef = useRef<DragOver | null>(null)
+  const suppressClick = useRef(false)
+
+  const beginRowDrag = (task: Task, event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    const target = event.target as HTMLElement
+    if (target.closest('button, input, textarea, select, a')) return
+    suppressClick.current = false
+    dragState.current = { id: task.id, x: event.clientX, y: event.clientY, active: false }
+  }
+
+  useEffect(() => {
+    const onMove = (event: PointerEvent) => {
+      const state = dragState.current
+      if (!state) return
+      if (!state.active) {
+        if (Math.abs(event.clientX - state.x) < 5 && Math.abs(event.clientY - state.y) < 5) return
+        state.active = true
+        setDragId(state.id)
+        document.body.classList.add('dragging-task')
+      }
+      event.preventDefault()
+      const listEl = document.querySelector<HTMLElement>('.list')
+      if (listEl) {
+        const rect = listEl.getBoundingClientRect()
+        if (event.clientY < rect.top + 30) listEl.scrollTop -= 12
+        else if (event.clientY > rect.bottom - 30) listEl.scrollTop += 12
+      }
+      const el = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null
+      const row = el?.closest('[data-task-id]') as HTMLElement | null
+      const id = row?.dataset.taskId
+      if (!row || !id || id === state.id) {
+        dragOverRef.current = null
+        setDragOver(null)
+        return
+      }
+      const rect = row.getBoundingClientRect()
+      const next = { id, after: event.clientY > rect.top + rect.height / 2 }
+      dragOverRef.current = next
+      setDragOver(next)
+    }
+
+    const onUp = () => {
+      const state = dragState.current
+      dragState.current = null
+      if (!state) return
+      if (!state.active) {
+        dragOverRef.current = null
+        setDragOver(null)
+        return
+      }
+      setDragId(null)
+      document.body.classList.remove('dragging-task')
+      const over = dragOverRef.current
+      dragOverRef.current = null
+      setDragOver(null)
+      suppressClick.current = true
+      if (over && over.id !== state.id) moveTask(state.id, over.id, over.after)
+    }
+
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onUp)
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
+      document.body.classList.remove('dragging-task')
+    }
+  }, [moveTask])
+
+  // 一次性按 DDL 排序：过期置顶、无 DDL 沉底；写回 order 后仍可手动拖拽。
+  const sortByDdl = () => {
+    const sorted = [...active].sort(compareByDdl)
+    if (sorted.length === 0) return
+    Promise.all(
+      sorted.map((task, index) =>
+        task.order === index + 1
+          ? Promise.resolve()
+          : saveTask({ ...task, order: index + 1 }),
+      ),
+    )
+      .then(() => {
+        refresh()
+        showToast('已按 DDL 排序')
+      })
+      .catch(() => showToast('排序失败'))
   }
 
   const applySettings = (patch: Partial<Settings>) => {
@@ -421,7 +558,18 @@ export function Editor() {
               + 新任务 <kbd>Ctrl N</kbd>
             </button>
             <div className="list">
-              {active.length > 0 && <div className="section-label">进行中 · {active.length}</div>}
+              {active.length > 0 && (
+                <div className="list-head">
+                  <span className="section-label">进行中 · {active.length}</span>
+                  <button
+                    className="sort-btn"
+                    onClick={sortByDdl}
+                    title="按截止日期排序，之后可以继续拖拽"
+                  >
+                    按 DDL 排序
+                  </button>
+                </div>
+              )}
               {active.map((task) => (
                 <TaskRow
                   key={task.id}
@@ -429,15 +577,30 @@ export function Editor() {
                   count={tomatoCounts[task.id] ?? 0}
                   selected={selected === task.id}
                   multi={multi.has(task.id)}
-                  onClick={(event) => selectRow(task, event)}
+                  onClick={(event) => {
+                    if (suppressClick.current) {
+                      suppressClick.current = false
+                      return
+                    }
+                    selectRow(task, event)
+                  }}
                   onToggle={() => toggleDone(task)}
-                  draggable
-                  onDragStart={() => setDragId(task.id)}
-                  onDrop={() => dropOn(task)}
+                  canDrag
+                  dragging={dragId === task.id}
+                  dropBefore={dragOver?.id === task.id && !dragOver.after}
+                  dropAfter={dragOver?.id === task.id && dragOver.after}
+                  completing={Boolean(completing[task.id])}
+                  completeKey={completing[task.id] ?? 0}
+                  onPointerDown={(event) => beginRowDrag(task, event)}
                 />
               ))}
               {completed.length > 0 && (
-                <div className="section-label">已完成 · {completed.length}</div>
+                <div
+                  className={`section-label ${completedPulse > 0 ? 'completed-label' : ''}`}
+                  key={`completed-${completedPulse}`}
+                >
+                  已完成 · {completed.length}
+                </div>
               )}
               {completed.map((task) => (
                 <TaskRow
@@ -565,29 +728,37 @@ function TaskRow(props: {
   selected: boolean
   multi: boolean
   done?: boolean
-  draggable?: boolean
+  canDrag?: boolean
+  dragging?: boolean
+  dropBefore?: boolean
+  dropAfter?: boolean
+  completing?: boolean
+  completeKey?: number
   onClick: (event: React.MouseEvent) => void
   onToggle: () => void
-  onDragStart?: () => void
-  onDrop?: () => void
+  onPointerDown?: (event: React.PointerEvent<HTMLDivElement>) => void
 }) {
   const { task, count, selected, multi, done, onClick, onToggle } = props
+  const classes = [
+    'task-row',
+    selected && 'selected',
+    multi && 'multi',
+    done && 'done',
+    props.canDrag && 'can-drag',
+    props.dragging && 'dragging',
+    props.dropBefore && 'drop-before',
+    props.dropAfter && 'drop-after',
+    props.completing && 'completing',
+  ]
+    .filter(Boolean)
+    .join(' ')
   return (
     <div
-      className={`task-row ${selected ? 'selected' : ''} ${multi ? 'multi' : ''} ${done ? 'done' : ''}`}
+      className={classes}
+      data-task-id={task.id}
       onClick={onClick}
-      draggable={Boolean(props.draggable)}
-      onDragStart={(event) => {
-        event.dataTransfer.effectAllowed = 'move'
-        props.onDragStart?.()
-      }}
-      onDragOver={(event) => {
-        if (props.draggable) event.preventDefault()
-      }}
-      onDrop={(event) => {
-        event.preventDefault()
-        props.onDrop?.()
-      }}
+      title={props.canDrag ? '拖动调整顺序' : undefined}
+      onPointerDown={props.onPointerDown}
     >
       <button
         className="row-check"
@@ -597,7 +768,7 @@ function TaskRow(props: {
         }}
         title={done ? '恢复' : '完成'}
       >
-        {done ? '✓' : ''}
+        {done || props.completing ? '✓' : ''}
       </button>
       <div className="row-body">
         <div className="row-name">{task.title || '未命名任务'}</div>
@@ -606,6 +777,36 @@ function TaskRow(props: {
           {count > 0 && <span className="row-tomato">🍅 {count}</span>}
         </div>
       </div>
+      {props.completing && (
+        <>
+          <span className="done-wash" aria-hidden="true" />
+          <span className="done-flash" aria-hidden="true" />
+          <span className="done-burst" aria-hidden="true">
+            {makeDoneSeeds(props.completeKey ?? 0).map((seed, index) => (
+              <i key={index} style={doneSeedStyle(seed)} />
+            ))}
+          </span>
+          <span className="done-ring" aria-hidden="true" />
+          <span className="done-ring done-ring-b" aria-hidden="true" />
+          <span className="done-star" aria-hidden="true">
+            ✦
+          </span>
+          <span className="done-sparks" aria-hidden="true">
+            {Array.from({ length: 10 }, (_, index) => (
+              <i
+                key={index}
+                style={{ '--i': index, '--dir': index % 2 === 0 ? -1 : 1 } as React.CSSProperties}
+              />
+            ))}
+          </span>
+          <span className="done-big-check" aria-hidden="true">
+            ✓
+          </span>
+          <span className="done-label" aria-hidden="true">
+            ✓ 完成
+          </span>
+        </>
+      )}
     </div>
   )
 }

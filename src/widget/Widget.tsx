@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { addTomato, getData, onStateChanged, openEditor, setDone, undoTomato } from '../shared/api'
-import { playTomato } from '../shared/sound'
+import { playComplete, playTomato } from '../shared/sound'
+import { doneSeedStyle, makeDoneSeeds } from '../shared/doneSeeds'
 import type { AppData, Task } from '../shared/types'
 import './widget.css'
 
@@ -41,10 +42,51 @@ function formatDdl(ddl: string | null) {
   return { label, overdue: days < 0 }
 }
 
+type Seed = {
+  dx: number
+  dy: number
+  rot: number
+  size: number
+  delay: number
+  emoji: boolean
+}
+
+/** 用点击时间做种子，保证同一次爆汁的粒子在重渲染时位置不变。 */
+function makeSeeds(seed: number): Seed[] {
+  let state = Math.abs(Math.floor(seed * 1000)) % 2147483647
+  if (state === 0) state = 1
+  const next = () => {
+    state = (state * 48271) % 2147483647
+    return state / 2147483647
+  }
+  return Array.from({ length: 10 }, (_, index) => ({
+    dx: -34 + next() * 42,
+    dy: 4 + next() * 28,
+    rot: -160 + next() * 320,
+    size: 3 + next() * 3.5,
+    delay: next() * 40,
+    emoji: index < 2,
+  }))
+}
+
+function seedStyle(seed: Seed): React.CSSProperties {
+  return {
+    '--dx': `${seed.dx}px`,
+    '--dy': `${seed.dy}px`,
+    '--rot': `${seed.rot}deg`,
+    '--size': `${seed.size}px`,
+    '--delay': `${seed.delay}ms`,
+  } as React.CSSProperties
+}
+
 export function Widget() {
   const [data, setData] = useState<AppData | null>(null)
   const [pulse, setPulse] = useState<Record<string, number>>({})
+  const [tide, setTide] = useState<number | null>(null)
+  const [doneAnim, setDoneAnim] = useState<Record<string, number>>({})
   const timers = useRef<Record<string, number>>({})
+  const tideTimer = useRef<number | null>(null)
+  const doneTimers = useRef<Record<string, number>>({})
 
   const refresh = useCallback(() => {
     getData().then(setData).catch(() => {})
@@ -98,7 +140,11 @@ export function Widget() {
 
   const giveTomato = (task: Task) => {
     playTomato(settings!)
-    setPulse((prev) => ({ ...prev, [task.id]: (prev[task.id] ?? 0) + 1 }))
+    // 用时间戳做动画 key：连续点击也能重新触发整套动画。
+    setPulse((prev) => ({ ...prev, [task.id]: performance.now() }))
+    setTide(performance.now())
+    if (tideTimer.current !== null) window.clearTimeout(tideTimer.current)
+    tideTimer.current = window.setTimeout(() => setTide(null), 3900)
     window.clearTimeout(timers.current[task.id])
     timers.current[task.id] = window.setTimeout(() => {
       setPulse((prev) => {
@@ -106,13 +152,29 @@ export function Widget() {
         delete next[task.id]
         return next
       })
-    }, 420)
+    }, 650)
     addTomato(task.id).catch(() => {})
   }
 
   const takeTomato = (task: Task) => {
     if (countFor(task) === 0) return
     undoTomato(task.id).catch(() => {})
+  }
+
+  const completeTask = (task: Task) => {
+    if (doneTimers.current[task.id] !== undefined) return
+    playComplete(settings!)
+    setDoneAnim((prev) => ({ ...prev, [task.id]: performance.now() }))
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    doneTimers.current[task.id] = window.setTimeout(() => {
+      delete doneTimers.current[task.id]
+      setDone(task.id, true).catch(() => {})
+      setDoneAnim((prev) => {
+        const next = { ...prev }
+        delete next[task.id]
+        return next
+      })
+    }, reduced ? 0 : 800)
   }
 
   if (!settings) return <div className="widget" />
@@ -124,9 +186,10 @@ export function Widget() {
   } as React.CSSProperties
 
   const now = new Date()
+  const glowing = Object.keys(doneAnim).length > 0
 
   return (
-    <div className="widget" style={style}>
+    <div className={`widget ${glowing ? 'done-glow' : ''}`} style={style}>
       <header className="widget-head" data-tauri-drag-region>
         <div className="head-left" data-tauri-drag-region>
           <span className="head-title" data-tauri-drag-region>
@@ -155,14 +218,19 @@ export function Widget() {
           const ddl = formatDdl(task.ddl)
           const count = countFor(task)
           const popping = pulse[task.id]
+          const completing = doneAnim[task.id]
+          const seeds = popping ? makeSeeds(popping) : []
           return (
-            <div className={`row ${popping ? 'popping' : ''}`} key={task.id}>
+            <div
+              className={`row ${popping ? 'popping' : ''} ${completing ? 'completing' : ''}`}
+              key={`${task.id}-${popping ?? 0}`}
+            >
               <button
                 className="check"
                 title="标记完成"
-                onClick={() => setDone(task.id, true).catch(() => {})}
+                onClick={() => completeTask(task)}
               >
-                <span className="check-dot" />
+                <span className="check-dot">{completing ? '✓' : ''}</span>
               </button>
               <button
                 className="row-main"
@@ -183,21 +251,99 @@ export function Widget() {
                   takeTomato(task)
                 }}
               >
+                {popping && (
+                  <>
+                    <span className="ring" aria-hidden="true" />
+                    <span className="burst" aria-hidden="true">
+                      {seeds.map((seed, index) => (
+                        <i
+                          className={`seed${seed.emoji ? ' emoji' : ''}`}
+                          key={index}
+                          style={seedStyle(seed)}
+                        >
+                          {seed.emoji ? '🍅' : ''}
+                        </i>
+                      ))}
+                    </span>
+                  </>
+                )}
                 {count === 0 ? (
                   <span className="tomato ghost">🍅</span>
                 ) : (
                   Array.from({ length: count }, (_, index) => (
-                    <span className="tomato" key={index}>
+                    <span
+                      className="tomato"
+                      key={index}
+                      style={{ animationDelay: `${Math.min(index * 16, 180)}ms` }}
+                    >
                       🍅
                     </span>
                   ))
                 )}
               </button>
               {popping && <span className="float-plus">+1</span>}
+              {completing && (
+                <>
+                  <span className="done-wash" aria-hidden="true" />
+                  <span className="done-flash" aria-hidden="true" />
+                  <span className="done-burst" aria-hidden="true">
+                    {makeDoneSeeds(completing).map((seed, index) => (
+                      <i key={index} style={doneSeedStyle(seed)} />
+                    ))}
+                  </span>
+                  <span className="done-ring" aria-hidden="true" />
+                  <span className="done-ring done-ring-b" aria-hidden="true" />
+                  <span className="done-star" aria-hidden="true">
+                    ✦
+                  </span>
+                  <span className="done-sparks" aria-hidden="true">
+                    {Array.from({ length: 10 }, (_, index) => (
+                      <i
+                        key={index}
+                        style={
+                          {
+                            '--i': index,
+                            '--dir': index % 2 === 0 ? -1 : 1,
+                          } as React.CSSProperties
+                        }
+                      />
+                    ))}
+                  </span>
+                  <span className="done-big-check" aria-hidden="true">
+                    ✓
+                  </span>
+                  <span className="done-label" aria-hidden="true">
+                    ✓ 完成
+                  </span>
+                </>
+              )}
             </div>
           )
         })}
       </div>
+
+      {tide && (
+        <div className="tide" key={tide} aria-hidden="true">
+          <svg viewBox="0 0 360 140" preserveAspectRatio="none">
+            <g className="tide-drift tide-drift-back">
+              <g className="tide-bob tide-bob-back">
+                <path
+                  className="tide-wave tide-back"
+                  d="M0 10 C30 32 60 0 90 10 C120 32 150 0 180 10 C210 32 240 0 270 10 C300 32 330 0 360 10 L360 160 L0 160 Z"
+                />
+              </g>
+            </g>
+            <g className="tide-drift tide-drift-front">
+              <g className="tide-bob tide-bob-front">
+                <path
+                  className="tide-wave tide-front"
+                  d="M0 20 C30 44 60 2 90 20 C120 44 150 2 180 20 C210 44 240 2 270 20 C300 44 330 2 360 20 L360 160 L0 160 Z"
+                />
+              </g>
+            </g>
+          </svg>
+        </div>
+      )}
     </div>
   )
 }

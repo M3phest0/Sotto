@@ -712,6 +712,7 @@ fn set_hotkey(app: tauri::AppHandle, hotkey: String) -> Result<(), String> {
 #[tauri::command]
 fn open_editor(app: tauri::AppHandle, task_id: Option<String>) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("editor") {
+        let _ = window.unminimize();
         window.show().map_err(|e| e.to_string())?;
         window.set_focus().map_err(|e| e.to_string())?;
         if let Some(id) = task_id {
@@ -988,6 +989,7 @@ fn clamp_editor_to_work_area(window: &tauri::WebviewWindow) {
 
 fn show_editor(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("editor") {
+        let _ = window.unminimize();
         let _ = window.show();
         clamp_editor_to_work_area(&window);
         let _ = window.set_focus();

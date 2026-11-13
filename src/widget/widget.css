@@ -1,3 +1,5 @@
+@import '../shared/tokens.css';
+
 * {
   box-sizing: border-box;
 }
@@ -13,19 +15,20 @@ body,
 }
 
 .widget-body {
-  font-family: 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif;
+  font-family: var(--font-ui);
   user-select: none;
   -webkit-user-select: none;
 }
 
 .widget {
+  position: relative;
   width: 100%;
   height: 100%;
   display: flex;
   flex-direction: column;
   background: var(--bg);
   color: var(--text);
-  border-radius: 18px;
+  border-radius: var(--radius-2xl);
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
   box-shadow: 0 18px 48px color-mix(in srgb, var(--text) 22%, transparent);
@@ -63,7 +66,7 @@ body,
 .today-tomato {
   font-size: 12px;
   padding: 3px 9px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--accent);
   font-weight: 600;
@@ -72,6 +75,7 @@ body,
 .widget-list {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 4px 10px 14px;
 }
 
@@ -81,7 +85,7 @@ body,
 
 .widget-list::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--text) 15%, transparent);
-  border-radius: 3px;
+  border-radius: var(--radius-2xs);
 }
 
 .widget-list::-webkit-scrollbar-track {
@@ -94,12 +98,269 @@ body,
   align-items: center;
   gap: 8px;
   padding: 10px 8px;
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   transition: background 120ms ease;
 }
 
 .row:hover {
   background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+/* 完成任务：绿色闪光横扫 + 整行抖动 + 文字抖动 + 对勾 + 粒子 + “✓ 完成”。 */
+.row.completing {
+  z-index: 1;
+  animation: doneShake 460ms cubic-bezier(0.36, 0.07, 0.19, 0.97);
+}
+
+.row.completing .check-dot {
+  background: var(--color-success);
+  border-color: var(--color-success);
+  animation: checkPop 360ms cubic-bezier(0.2, 1.4, 0.4, 1);
+}
+
+.row.completing .row-title,
+.row.completing .ddl {
+  animation: textShake 420ms cubic-bezier(0.36, 0.07, 0.19, 0.97);
+}
+
+.row.completing .row-title {
+  position: relative;
+  color: color-mix(in srgb, var(--text) 45%, transparent);
+}
+
+.row.completing .row-title::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 100%;
+  height: 3px;
+  background: currentColor;
+  transform: scaleX(0);
+  transform-origin: left center;
+  animation: strikeSweep 360ms 70ms ease-out forwards;
+}
+
+.done-flash {
+  position: absolute;
+  left: -10px;
+  right: -10px;
+  top: 50%;
+  height: 60px;
+  margin-top: -30px;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--color-success) 38%, transparent) 12%,
+    color-mix(in srgb, var(--color-success) 82%, transparent) 30%,
+    color-mix(in srgb, var(--color-success) 82%, transparent) 70%,
+    color-mix(in srgb, var(--color-success) 38%, transparent) 88%,
+    transparent 100%
+  );
+  filter: blur(1.2px);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-55%) scaleY(0.6);
+  animation: doneFlash 560ms cubic-bezier(0.2, 0.8, 0.3, 1) forwards;
+  z-index: 1;
+}
+
+.done-burst {
+  position: absolute;
+  left: 18px;
+  top: 50%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.done-burst i {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--size);
+  height: var(--size);
+  margin: calc(var(--size) / -2) 0 0 calc(var(--size) / -2);
+  border-radius: 50%;
+  background: var(--color-success);
+  opacity: 0;
+  animation: doneSeed 520ms cubic-bezier(0.15, 0.7, 0.3, 1) var(--delay) forwards;
+}
+
+.done-label {
+  position: absolute;
+  left: 40px;
+  top: 50%;
+  z-index: 3;
+  margin-top: -9px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--color-success) 14%, transparent);
+  color: var(--color-success);
+  font-size: 11px;
+  font-weight: 700;
+  pointer-events: none;
+  white-space: nowrap;
+  animation: doneLabel 620ms cubic-bezier(0.2, 0.8, 0.3, 1) forwards;
+}
+
+@keyframes checkPop {
+  0% {
+    transform: scale(0.7);
+  }
+  45% {
+    transform: scale(1.35);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes strikeSweep {
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes doneFlash {
+  0% {
+    opacity: 0;
+    transform: translateX(-55%) scaleY(0.6);
+  }
+  14% {
+    opacity: 1;
+    transform: translateX(-22%) scaleY(1.05);
+  }
+  28% {
+    opacity: 0.5;
+  }
+  42% {
+    opacity: 1;
+    transform: translateX(5%) scaleY(1.1);
+  }
+  58% {
+    opacity: 0.45;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(55%) scaleY(0.7);
+  }
+}
+
+@keyframes doneShake {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  12% {
+    transform: translate(-3px, 1px);
+  }
+  24% {
+    transform: translate(3px, -1px);
+  }
+  36% {
+    transform: translate(-2px, 1px);
+  }
+  48% {
+    transform: translate(2px, -1px);
+  }
+  62% {
+    transform: translate(-1px, 1px);
+  }
+  76% {
+    transform: translate(1px, 0);
+  }
+}
+
+@keyframes textShake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  14% {
+    transform: translateX(-2px);
+  }
+  28% {
+    transform: translateX(2px);
+  }
+  42% {
+    transform: translateX(-1.5px);
+  }
+  58% {
+    transform: translateX(1.5px);
+  }
+  74% {
+    transform: translateX(-1px);
+  }
+}
+
+@keyframes doneSeed {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) scale(0.4);
+  }
+  20% {
+    opacity: 1;
+  }
+  55% {
+    opacity: 1;
+    transform: translate(calc(var(--dx) * 0.7), calc(var(--dy) * -1)) scale(1.1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(var(--dx), var(--dy)) scale(0.5);
+  }
+}
+
+@keyframes doneLabel {
+  0% {
+    opacity: 0;
+    transform: translate(0, 10px) scale(0.8);
+  }
+  22% {
+    opacity: 1;
+    transform: translate(0, -2px) scale(1.08);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(14px, -18px) scale(0.95);
+  }
+}
+
+.row.popping {
+  animation: rowNudge 240ms ease;
+}
+
+.row.popping .tomato {
+  animation: tomatoBounce 420ms cubic-bezier(0.3, 1.6, 0.5, 1);
+}
+
+@keyframes rowNudge {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  30% {
+    transform: translateX(-2px);
+  }
+  65% {
+    transform: translateX(2px);
+  }
+}
+
+@keyframes tomatoBounce {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  35% {
+    transform: translateY(-7px) scale(1.12);
+  }
+  70% {
+    transform: translateY(1px) scale(0.98);
+  }
 }
 
 .check {
@@ -117,8 +378,14 @@ body,
 .check-dot {
   width: 16px;
   height: 16px;
+  display: grid;
+  place-items: center;
   border-radius: 50%;
   border: 1.8px solid color-mix(in srgb, var(--text) 35%, transparent);
+  color: var(--color-white);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
   transition: all 140ms ease;
 }
 
@@ -156,18 +423,19 @@ body,
 }
 
 .ddl.overdue {
-  color: #d6453d;
+  color: var(--color-overdue);
   opacity: 1;
   font-weight: 600;
 }
 
 .tomato-btn {
+  position: relative;
   flex: none;
   max-width: 112px;
   min-width: 26px;
   min-height: 26px;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: transparent;
   cursor: pointer;
   opacity: 0.55;
@@ -207,42 +475,455 @@ body,
 }
 
 .row.popping .tomato-btn {
-  animation: pop 380ms ease;
+  animation: pop 480ms cubic-bezier(0.2, 1.2, 0.3, 1);
 }
 
 @keyframes pop {
   0% {
-    transform: scale(0.8);
+    transform: scale(0.82) rotate(0);
   }
-  45% {
-    transform: scale(1.35) rotate(-8deg);
+  30% {
+    transform: scale(1.5) rotate(-9deg);
+  }
+  58% {
+    transform: scale(1.16) rotate(5deg);
+  }
+  80% {
+    transform: scale(1.04) rotate(-2deg);
   }
   100% {
-    transform: scale(1);
+    transform: scale(1) rotate(0);
+  }
+}
+
+.ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  animation: ringOut 340ms ease-out forwards;
+}
+
+@keyframes ringOut {
+  0% {
+    opacity: 0.55;
+    transform: scale(0.5);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(2.6);
+  }
+}
+
+.burst {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.seed {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--size);
+  height: var(--size);
+  margin: calc(var(--size) / -2) 0 0 calc(var(--size) / -2);
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0;
+  animation: seedFly 520ms cubic-bezier(0.15, 0.7, 0.3, 1) var(--delay) forwards;
+}
+
+.seed.emoji {
+  width: auto;
+  height: auto;
+  margin: -6px 0 0 -6px;
+  background: transparent;
+  font-size: 12px;
+  line-height: 1;
+}
+
+@keyframes seedFly {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) scale(0.4);
+  }
+  15% {
+    opacity: 1;
+  }
+  55% {
+    opacity: 1;
+    transform: translate(calc(var(--dx) * 0.8), calc(var(--dy) * -1)) scale(1.1)
+      rotate(calc(var(--rot) * 0.5));
+  }
+  100% {
+    opacity: 0;
+    transform: translate(var(--dx), var(--dy)) scale(0.5) rotate(var(--rot));
   }
 }
 
 .float-plus {
   position: absolute;
-  right: 34px;
-  font-size: 12px;
-  font-weight: 700;
+  right: 54px;
+  top: 2px;
+  z-index: 3;
+  font-size: 14px;
+  font-weight: 800;
   color: var(--accent);
   pointer-events: none;
-  animation: floatUp 520ms ease forwards;
+  text-shadow:
+    0 1px 2px color-mix(in srgb, var(--bg) 75%, transparent),
+    0 2px 8px color-mix(in srgb, var(--accent) 35%, transparent);
+  animation: floatUp 620ms cubic-bezier(0.2, 0.8, 0.3, 1) forwards;
 }
 
 @keyframes floatUp {
   0% {
     opacity: 0;
-    transform: translateY(4px);
+    transform: translate(0, 8px) scale(0.7);
   }
-  25% {
+  18% {
+    opacity: 1;
+    transform: translate(-2px, -4px) scale(1.3);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-16px, -30px) scale(0.9);
+  }
+}
+
+/* 底部涨潮：两层错相的波浪，先快速涌起，再慢慢退去。 */
+.tide {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 140px;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.tide svg {
+  display: block;
+  width: 110%;
+  height: 100%;
+  margin-left: -5%;
+}
+
+/* 停在最高位时左右涌动，两层反相、速度不同，制造起伏感。 */
+.tide-drift {
+  animation: tideDrift 2600ms linear infinite alternate;
+}
+
+.tide-drift-back {
+  --sway: 10px;
+  animation-duration: 2600ms;
+  animation-direction: alternate-reverse;
+}
+
+.tide-drift-front {
+  --sway: 16px;
+  animation-duration: 1800ms;
+}
+
+@keyframes tideDrift {
+  from {
+    transform: translateX(calc(var(--sway) * -1));
+  }
+  to {
+    transform: translateX(var(--sway));
+  }
+}
+
+/* 高度的小幅呼吸，与横向涌动分开，频率更高。 */
+.tide-bob {
+  --bob: 9px;
+  animation: tideBob 700ms ease-in-out infinite alternate;
+}
+
+.tide-bob-back {
+  --bob: 4px;
+  animation-duration: 1300ms;
+  animation-direction: alternate-reverse;
+  animation-delay: -300ms;
+}
+
+.tide-bob-front {
+  animation-delay: -150ms;
+}
+
+@keyframes tideBob {
+  from {
+    transform: translateY(calc(var(--bob) * -1));
+  }
+  to {
+    transform: translateY(var(--bob));
+  }
+}
+
+.tide-wave {
+  transform-box: view-box;
+  transform: translateY(100%);
+  opacity: 0;
+  animation: tideSwell 3740ms linear forwards;
+}
+
+.tide-back {
+  fill: color-mix(in srgb, var(--accent) 18%, transparent);
+  animation-delay: 60ms;
+}
+
+.tide-front {
+  fill: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+@keyframes tideSwell {
+  0% {
+    opacity: 0;
+    transform: translateY(100%);
+    animation-timing-function: cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  7% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  20% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  28% {
+    opacity: 1;
+    transform: translateY(18%);
+  }
+  43% {
+    opacity: 0.9;
+    transform: translateY(45%);
+  }
+  65% {
+    opacity: 0.6;
+    transform: translateY(74%);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(100%);
+  }
+}
+
+/* 完成动画增强：全行泛光、双环星芒、删除线火花、大字 ✓、便签外框绿光。 */
+.widget.done-glow {
+  animation: widgetGlow 720ms ease-out;
+}
+
+@keyframes widgetGlow {
+  0%,
+  100% {
+    box-shadow: 0 18px 48px color-mix(in srgb, var(--text) 22%, transparent);
+  }
+  35% {
+    box-shadow:
+      0 18px 48px color-mix(in srgb, var(--text) 22%, transparent),
+      0 0 0 2px color-mix(in srgb, var(--color-success) 55%, transparent),
+      0 0 36px color-mix(in srgb, var(--color-success) 55%, transparent);
+  }
+}
+
+.done-wash {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(
+    circle at 18px 50%,
+    color-mix(in srgb, var(--color-success) 34%, transparent),
+    transparent 68%
+  );
+  opacity: 0;
+  pointer-events: none;
+  z-index: -1;
+  animation: doneWash 420ms ease-out forwards;
+}
+
+.done-ring {
+  position: absolute;
+  left: 18px;
+  top: 50%;
+  width: 24px;
+  height: 24px;
+  margin: -12px 0 0 -12px;
+  border: 2px solid var(--color-success);
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 3;
+  animation: doneRing 460ms ease-out forwards;
+}
+
+.done-ring-b {
+  animation-delay: 80ms;
+}
+
+.done-star {
+  position: absolute;
+  left: 18px;
+  top: 50%;
+  z-index: 4;
+  color: var(--color-success);
+  font-size: 20px;
+  line-height: 1;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  animation: doneStar 520ms ease-out forwards;
+}
+
+.done-sparks {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.done-sparks i {
+  position: absolute;
+  left: calc(12% + var(--i) * 8%);
+  top: 40%;
+  width: calc(7px + var(--i) * 1px);
+  height: calc(7px + var(--i) * 1px);
+  border-radius: 50%;
+  background: radial-gradient(circle, #fff 0 22%, var(--color-success) 23% 100%);
+  box-shadow: 0 0 12px 3px color-mix(in srgb, var(--color-success) 55%, transparent);
+  opacity: 0;
+  animation: doneSpark 560ms ease-out calc(40ms + var(--i) * 20ms) forwards;
+}
+
+.done-big-check {
+  position: absolute;
+  left: 34px;
+  top: 50%;
+  z-index: 4;
+  font-size: 34px;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--color-success);
+  text-shadow: 0 0 14px color-mix(in srgb, var(--color-success) 55%, transparent);
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(-50%, -50%);
+  animation: doneBigCheck 760ms cubic-bezier(0.2, 0.9, 0.3, 1.2) forwards;
+}
+
+@keyframes doneWash {
+  0% {
+    opacity: 0;
+  }
+  30% {
     opacity: 1;
   }
   100% {
     opacity: 0;
-    transform: translateY(-16px);
+  }
+}
+
+@keyframes doneRing {
+  0% {
+    opacity: 0.7;
+    transform: scale(0.4);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(2.8);
+  }
+}
+
+@keyframes doneStar {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.2) rotate(0deg);
+  }
+  35% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.4) rotate(45deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.8) rotate(90deg);
+  }
+}
+
+@keyframes doneSpark {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) scale(0.2);
+  }
+  12% {
+    opacity: 1;
+    transform: translate(calc((var(--i) - 4.5) * 3px), calc(var(--dir) * 6px)) scale(1.4);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(
+        calc((var(--i) - 4.5) * 14px),
+        calc(var(--dir) * (40px + var(--i) * 6px))
+      )
+      scale(0.4) rotate(180deg);
+  }
+}
+
+@keyframes doneBigCheck {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.4);
+  }
+  30% {
+    opacity: 1;
+    transform: translate(-50%, -90%) scale(1.4);
+  }
+  65% {
+    opacity: 1;
+    transform: translate(-50%, -120%) scale(1.05);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -150%) scale(0.9);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row.popping,
+  .row.popping .tomato-btn,
+  .row.popping .tomato,
+  .row.completing,
+  .row.completing .check-dot,
+  .row.completing .row-title,
+  .row.completing .ddl,
+  .row.completing .row-title::after,
+  .widget.done-glow {
+    animation: none;
+  }
+  .burst,
+  .ring,
+  .tide,
+  .done-flash,
+  .done-burst,
+  .done-label,
+  .done-wash,
+  .done-ring,
+  .done-star,
+  .done-sparks,
+  .done-big-check {
+    display: none;
+  }
+  .float-plus {
+    animation-duration: 200ms;
   }
 }
 
