@@ -25,6 +25,19 @@ Windows 11 桌面便签 + 番茄记录。
 - 设置：主题三色自定义、便签宽高、音效开关/音量/自定义音频、快捷键、开机自启、导出/导入、打开数据目录
 - 数据：`%APPDATA%\Sotto\data.json`（番茄按 `{taskId, ts}` 记录），每天自动备份 7 份
 
+## 已验证（release 包）
+
+- 启动后便签出现在记忆位置，单实例生效
+- 编辑器：任务列表/详情渲染、番茄 +1/−1、Esc 收起、`Ctrl+Alt+E` 全局唤起
+- 拖动便签 100px 后位置写入 `data.json`，重启读取
+- 自动启动路径校正：release 启动时把 Run 键指向当前 exe（测试后已恢复原值）
+- 200% DPI、720×1040 物理像素窗口、WebView2 加载本地打包资源、内置音效随包
+
+## 备份
+
+- 本地：`E:\share\Claude\Sotto.0.0.2-backup\sotto-2.0-final-20261113.bundle`（git bundle）与 `sotto-2.0-final-src-20261113.zip`（源码）
+- GitHub：未推送。需要确认仓库（现有远端为 `M3phest0/Sotto`）与分支/可见性后执行 `git push -u origin v2.0`。
+
 ## 已知限制
 
 - 统计图界面未做（数据已就绪）
