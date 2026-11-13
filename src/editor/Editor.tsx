@@ -26,6 +26,11 @@ import './editor.css'
 
 type View = 'tasks' | 'stats' | 'settings'
 
+const ZOOM_KEY = 'sotto.editorZoom'
+const ZOOM_MIN = 0.75
+const ZOOM_MAX = 2
+const ZOOM_STEP = 0.1
+
 const EMPTY_SETTINGS: Settings = {
   theme: { bg: '#FFF9F2', text: '#2A2622', accent: '#E8563F' },
   soundEnabled: true,
@@ -84,6 +89,38 @@ export function Editor() {
     if (toastTimer.current) window.clearTimeout(toastTimer.current)
     toastTimer.current = window.setTimeout(() => setToast(''), 2000)
   }, [])
+
+  // 页面缩放：Ctrl + = / - / 0，或 Ctrl + 滚轮。
+  const zoomRef = useRef(1)
+
+  const applyZoom = useCallback(
+    (next: number) => {
+      const clamped = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(next * 10) / 10))
+      zoomRef.current = clamped
+      document.documentElement.style.zoom = String(clamped)
+      localStorage.setItem(ZOOM_KEY, String(clamped))
+      showToast(`缩放 ${Math.round(clamped * 100)}%`)
+    },
+    [showToast],
+  )
+
+  useEffect(() => {
+    const saved = Number(localStorage.getItem(ZOOM_KEY))
+    const initial =
+      Number.isFinite(saved) && saved >= ZOOM_MIN && saved <= ZOOM_MAX ? saved : 1
+    zoomRef.current = initial
+    document.documentElement.style.zoom = String(initial)
+  }, [])
+
+  useEffect(() => {
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey) return
+      event.preventDefault()
+      applyZoom(zoomRef.current + (event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP))
+    }
+    window.addEventListener('wheel', onWheel, { passive: false })
+    return () => window.removeEventListener('wheel', onWheel)
+  }, [applyZoom])
 
   useEffect(() => {
     refresh()
@@ -220,6 +257,24 @@ export function Editor() {
       const target = event.target as HTMLElement
       const inField =
         target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
+
+      if (event.ctrlKey || event.metaKey) {
+        if (event.key === '=' || event.key === '+') {
+          event.preventDefault()
+          applyZoom(zoomRef.current + ZOOM_STEP)
+          return
+        }
+        if (event.key === '-') {
+          event.preventDefault()
+          applyZoom(zoomRef.current - ZOOM_STEP)
+          return
+        }
+        if (event.key === '0') {
+          event.preventDefault()
+          applyZoom(1)
+          return
+        }
+      }
 
       if ((event.ctrlKey && event.key.toLowerCase() === 'w') || (event.key === 'Escape' && !inField)) {
         event.preventDefault()
