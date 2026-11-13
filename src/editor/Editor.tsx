@@ -796,7 +796,10 @@ function StatsPanel(props: { tomatoes: Tomato[]; tasks: Task[]; accent: string }
             </div>
 
             <div className="timeline">
-              <div className="timeline-bins">
+              <div
+                className="timeline-bins"
+                style={{ height: Math.max(26, Math.max(...timeline.map((bin) => bin.length), 1) * 16 + 6) }}
+              >
                 {timeline.map((bin, index) => (
                   <div className="timeline-bin" key={index}>
                     <div className="timeline-bin-inner">

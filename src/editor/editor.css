@@ -874,7 +874,7 @@ button.danger:hover {
 
 .timeline-bins {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   height: 26px;
 }
 
@@ -892,11 +892,12 @@ button.danger:hover {
 .timeline-bin-inner {
   position: absolute;
   left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
+  bottom: 2px;
+  transform: translateX(-50%);
   display: flex;
+  flex-direction: column-reverse;
+  align-items: center;
   gap: 1px;
-  white-space: nowrap;
 }
 
 .timeline-tomato {
